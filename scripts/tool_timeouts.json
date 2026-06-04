@@ -1,0 +1,81 @@
+{
+  "default_timeout_seconds": 60,
+  "tools": {
+    "black": {
+      "timeout_seconds": 120,
+      "timeout_retries": 1,
+      "cleanup_patterns": [
+        "-m black( |$)"
+      ],
+      "command": [
+        "-m",
+        "black",
+        "--no-cache"
+      ]
+    },
+    "ruff": {
+      "timeout_seconds": 45,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ]
+    },
+    "compileall": {
+      "timeout_seconds": 60,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "-m",
+        "compileall",
+        "src",
+        "tests"
+      ]
+    },
+    "pytest": {
+      "timeout_seconds": 120,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "-m",
+        "pytest"
+      ]
+    },
+    "entropy_check": {
+      "timeout_seconds": 90,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "TheKnowledge/standards-and-practices/dev-utils/security/run_entropy_harness.py"
+      ]
+    },
+    "entropy_tripwire_verify": {
+      "timeout_seconds": 120,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "TheKnowledge/standards-and-practices/dev-utils/security/verify_entropy_tripwire.py"
+      ]
+    },
+    "knack_check": {
+      "timeout_seconds": 90,
+      "runtime_policy": "steady_state_python_tools",
+      "command": [
+        "python",
+        "TheKnowledge/scripts/validate_knacks.py",
+        "--project-root",
+        "."
+      ]
+    },
+    "windows_shims_linux": {
+      "timeout_seconds": 150,
+      "timeout_retries": 0,
+      "command": [
+        "scripts/windows/verify-windows-shims-linux.sh"
+      ]
+    }
+  }
+}

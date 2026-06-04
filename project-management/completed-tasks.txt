@@ -1,0 +1,27 @@
+Completed Tasks
+
+Record completed tasks with newest entries at the top. Use asterisk-plus-blank
+line formatting. Include concise outcomes, owners, blocker resolution notes,
+and ISO 8601 timestamps.
+
+* 2026-06-02T20:04:27-07:00 - Restored the managed local quality-gate
+  runner files required by the standardized ACP helper. Added
+  `scripts/run_quality_gate_cached.py`, `scripts/run_tool_with_timeout.py`,
+  `scripts/tool_execution_constraints.py`, and `scripts/tool_timeouts.json`,
+  and pointed consuming-project entropy and knack checks at the
+  `TheKnowledge/` submodule. The full cached quality gate passed.
+
+* 2026-06-02T19:58:50-07:00 - Fixed dev install failures discovered during
+  the first `./install.sh --mode dev` run. The project install hook now
+  preserves the `.venv/bin/python` symlink path instead of resolving it to the
+  base pyenv interpreter, and compatibility launchers now force `src/` ahead
+  of `scripts/` on `sys.path` so editable installs cannot shadow the package.
+  Full dev install, launcher help checks, Ruff, compileall, and pytest passed.
+
+* 2026-06-02T19:25:34-07:00 - Completed the standalone Python project
+  restructure requested by the operator. Ubersight now uses a `src/ubersight/`
+  package layout, root `pyproject.toml`, pinned development requirements,
+  TheKnowledge-managed bootstrap/install files, console-script entry points,
+  compatibility launchers for legacy `scripts/*.py` commands, and tests for
+  package launchers. Validation passed with Black, Ruff, compileall, pytest,
+  entry-point help checks, and an isolated package-install smoke.
