@@ -45,6 +45,10 @@ produced them.
   blocked.
 - For multi-phase work, publish the last two completed phases, the active
   phase, and the next five known phases when that information is known.
+- Keep Ubersight phase and slice lists sourced from
+  `project-management/development-roadmap.md`. That roadmap document should
+  always exist; create or restore it before relying on Ubersight status when
+  it is missing.
 - Keep phase titles short. Source phase titles as titles only, not prose
   descriptions or state-bearing labels.
 - Keep slice titles to one display row. Ubersight clips long slice text

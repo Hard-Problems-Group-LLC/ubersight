@@ -1,0 +1,56 @@
+Rocky Linux 10 transplant recovery
+
+Status: Closed
+Date Opened: 2026-07-10T03:49:16-07:00
+Date Resolved: 2026-07-10T04:04:40-07:00
+Owner: Codex and operator
+Scope: generated-state scrub, Python bootstrap, validation runtime, and
+project-local assistant restoration
+
+Summary
+
+Ubersight was restored from Rocky Linux 9.8 with an unusable Python 3.12.12
+venv, host-generated caches, a scrubbed managed Codex package payload, and a
+protected isolated assistant home. The project is usable again on Rocky Linux
+10.2 through both standard and development installation paths.
+
+Root cause:
+
+- The transplanted venv referenced a removed Rocky Linux 9.8 pyenv build.
+- The default scrub plan selected system Python despite user-pyenv ownership.
+- Managed bootstrap implicitly updated existing pyenv checkouts, installed the
+  bootstrap compatibility floor, and reused standard venvs without validating
+  their base interpreter.
+- Validation resolved the `.venv/bin/python` symlink and hid venv-installed
+  tools from nested Black execution.
+- Generated Codex npm state and accumulated isolated-home state lacked an
+  explicit split in the recovery procedure.
+
+Resolution:
+
+- Selected pyenv CPython 3.14.6, added drift-aware venv recreation, isolated
+  HOME safeguards, non-mutating pyenv reuse, and symlink-preserving validation.
+- Applied the volatile scrub with explicit protected-path exclusions and
+  rebuilt the project venv and dependency set.
+- Dog-fooded user-local standard and repo-local development installs.
+- Rebuilt and upgraded project-local Codex to stable 0.144.1 while preserving
+  the isolated home and retained login.
+- Added regression tests, recovery specifications, cross-system ECRs, and
+  reusable guidance in the shared modernization guide.
+
+Verification:
+
+- Protected-home checksum dry run reported zero changes before first launch.
+- Standard and development installs passed on Python 3.14.6.
+- Ubersight produced a 40-line one-shot dashboard snapshot.
+- Codex launcher version/login checks and codex-wrangler self-test passed;
+  npm audit reported zero vulnerabilities.
+- Black, Ruff, compileall, entropy scan, and entropy tripwire passed.
+- Pytest passed 93 tests on Python 3.14.6.
+
+Related records:
+
+- `docs/specifications/rocky-10-transplant-recovery.md`
+- `ECRs/TheKnowledge/open/transplant-safe-pyenv-and-validation-runtime.md`
+- `ECRs/AI-ASSISTED-ADMIN/open/scrubber-interpreter-ownership.md`
+- `ECRs/AI-ASSISTED-ADMIN/open/local-state-inspection-publication-boundary.md`

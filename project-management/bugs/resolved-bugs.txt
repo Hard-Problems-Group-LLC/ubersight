@@ -6,3 +6,14 @@ include the ISO 8601 timestamp for when the fix was recorded, a short symptom
 summary, `Root cause:` analysis, and `Resolution:` notes. Add commit or test
 references when they help trace the fix. Keep any detailed closure records
 aligned under `closed/`.
+
+* 2026-07-10T04:04:40-07:00 - Rocky Linux 10.2 transplant recovery. A
+  transplanted Python 3.12.12 venv, implicit bootstrap ownership, and a
+  missing generated
+  Codex payload made the checkout unusable. Root cause: host-derived runtime
+  state crossed the OS boundary while bootstrap and validation conflated
+  compatibility floors, user-owned tooling, and resolved interpreter paths.
+  Resolution: rebuilt on pyenv Python 3.14.6, preserved isolated assistant
+  state, repaired standard/dev installation and Codex, added regression tests
+  and ECRs, and passed the complete 93-test quality gate. Details:
+  `closed/rocky-10-transplant-recovery.txt`

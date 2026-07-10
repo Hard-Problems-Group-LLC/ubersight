@@ -231,3 +231,13 @@ __marimo__/
 bin/codex-local
 README-LOCAL-Start-Codex.md
 # <<< THEKNOWLEDGE_MANAGED_IGNORES_END <<<
+
+# BEGIN managed by codex-wrangler
+# Local Codex package, home, wrapper, and sentinel artifacts.
+.codex-local/
+.codex-home/
+.codex
+.local/
+bin/codex-local
+README-LOCAL-Start-Codex.md
+# END managed by codex-wrangler

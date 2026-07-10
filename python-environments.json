@@ -7,7 +7,7 @@
   },
   "runtime": {
     "required_version": "3.12",
-    "base_version": "3.12.12",
-    "environment_name": "3.12.12"
+    "base_version": "3.14.6",
+    "environment_name": "3.14.6"
   }
 }

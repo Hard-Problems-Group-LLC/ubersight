@@ -445,7 +445,7 @@ def _normalize_executable_candidate(repo_root: Path, candidate: str) -> str:
     if path_like:
         path = Path(candidate)
         if not path.is_absolute():
-            path = (repo_root / path).resolve()
+            path = Path(os.path.abspath(str(repo_root / path)))
         return str(path)
     return candidate
 
