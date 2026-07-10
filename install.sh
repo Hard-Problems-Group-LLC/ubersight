@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pyenv_fallback_version="3.14.6"
 
 usage() {
   cat <<'EOF'
@@ -123,12 +124,16 @@ ensure_user_pyenv_python() {
     return 1
   fi
   if [[ ! -x "$pyenv_bin" ]]; then
+    if [[ -e "$pyenv_root" ]]; then
+      echo "install.sh: existing pyenv root has no executable at" >&2
+      echo "install.sh: ${pyenv_bin}. Repair it explicitly before retrying." >&2
+      return 1
+    fi
     git clone https://github.com/pyenv/pyenv.git "$pyenv_root"
-  else
-    git -C "$pyenv_root" pull --ff-only
   fi
-  "$pyenv_bin" install -s 3.12.12
-  printf '%s\n' "${pyenv_root}/versions/3.12.12/bin/python"
+  "$pyenv_bin" install -s "$pyenv_fallback_version"
+  printf '%s\n' \
+    "${pyenv_root}/versions/${pyenv_fallback_version}/bin/python"
 }
 
 confirm_root_user_install() {

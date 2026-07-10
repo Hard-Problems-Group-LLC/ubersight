@@ -4,6 +4,27 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-07-10T04:14:15-07:00 - Refined the shared modernization guide after
+  the final ordinary development install. Corrected unsafe real-home sentinel
+  advice, distinguished default and explicit HOME acceptance, documented
+  stateful standard/dev launcher targets and managed-ignore ownership, and
+  filed focused ECRs for the shared contracts.
+
+* 2026-07-10T04:04:40-07:00 - Recovered the transplanted Ubersight
+  checkout on Rocky Linux 10.2. Rebuilt standard and development environments
+  on pyenv Python 3.14.6, preserved project-local assistant state, restored and
+  upgraded isolated
+  Codex to stable 0.144.1 with retained login, added bootstrap regression
+  coverage and cross-system ECRs, improved the shared modernization guide,
+  rendered a real dashboard smoke snapshot, and passed all required checks
+  with 93 tests.
+
+* 2026-06-13T23:10:42-07:00 - Added roadmap-backed Ubersight status
+  maintenance. Created `project-management/development-roadmap.md`, aligned
+  `project-management/state/phase-slice-stack.md`, and updated `AGENTS.md`
+  so Ubersight's own phase and slice status rows are sourced from the tracked
+  roadmap convention already used by consuming projects.
+
 * 2026-06-02T20:04:27-07:00 - Restored the managed local quality-gate
   runner files required by the standardized ACP helper. Added
   `scripts/run_quality_gate_cached.py`, `scripts/run_tool_with_timeout.py`,

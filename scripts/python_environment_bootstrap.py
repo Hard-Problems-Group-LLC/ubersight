@@ -168,12 +168,17 @@ def ensure_pyenv_installed(
     pyenv_root_path: Path,
     runner: Callable[..., subprocess.CompletedProcess],
 ) -> Path:
-    """Clone or update the user-scoped pyenv checkout and return its binary."""
+    """Clone a missing pyenv checkout or reuse an existing user-owned one."""
 
     pyenv_executable = pyenv_bin(pyenv_root_path)
-    if pyenv_executable.exists():
-        runner(["git", "-C", str(pyenv_root_path), "pull", "--ff-only"])
+    if pyenv_executable.is_file() and os.access(pyenv_executable, os.X_OK):
         return pyenv_executable
+
+    if pyenv_root_path.exists():
+        raise RuntimeError(
+            "Existing pyenv root has no executable at {}. Repair or replace "
+            "the user-owned checkout explicitly.".format(pyenv_executable)
+        )
 
     runner(["git", "clone", PYENV_REPO, str(pyenv_root_path)])
     return pyenv_executable
@@ -183,12 +188,16 @@ def ensure_pyenv_virtualenv_plugin(
     pyenv_root_path: Path,
     runner: Callable[..., subprocess.CompletedProcess],
 ) -> Path:
-    """Clone or update the optional `pyenv-virtualenv` plugin checkout."""
+    """Clone a missing plugin or reuse an existing user-owned checkout."""
 
     plugin_root = pyenv_root_path / "plugins" / "pyenv-virtualenv"
-    if plugin_root.exists():
-        runner(["git", "-C", str(plugin_root), "pull", "--ff-only"])
+    if plugin_root.is_dir():
         return plugin_root
+
+    if plugin_root.exists():
+        raise RuntimeError(
+            "Existing pyenv-virtualenv path is not a directory: {}".format(plugin_root)
+        )
 
     plugin_root.parent.mkdir(parents=True, exist_ok=True)
     runner(["git", "clone", PYENV_PLUGIN_REPO, str(plugin_root)])

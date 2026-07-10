@@ -12,7 +12,8 @@ context. Ubersight itself remains project-neutral.
 
 ## Install
 
-For normal development from this checkout:
+For normal development from this checkout, use the managed Python 3.14.6
+runtime:
 
 ```bash
 ./install.sh --mode dev
@@ -32,6 +33,11 @@ For a user-local standard install, run:
 ```bash
 ./install.sh
 ```
+
+User-scoped paths follow the selected user home. If `HOME` points at this
+checkout's isolated `.codex-home`, the installer stops instead of placing pyenv,
+launchers, or the standard venv there. Run it from a normal terminal, or pass
+`--user-home PATH` to name the intended home explicitly.
 
 The legacy `scripts/*.py` entry points are compatibility launchers. The
 application package lives under `src/ubersight/`.
