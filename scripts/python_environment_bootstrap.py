@@ -238,6 +238,38 @@ def ensure_pyenv_context(
     return selection_name(context)
 
 
+def rebuild_pyenv_context(
+    pyenv_root_path: Path,
+    context: PythonContextConfig,
+    runner: Callable[..., subprocess.CompletedProcess],
+) -> str:
+    """Force-rebuild one configured pyenv context after a failed capability check.
+
+    This deliberately reuses the normal context-selection rules so legacy
+    pyenv-virtualenv configurations are recreated after their base Python is
+    rebuilt.
+    """
+
+    env = pyenv_environment(pyenv_root_path)
+    runner(
+        pyenv_command(pyenv_root_path, "install", "--force", context.base_version),
+        env=env,
+    )
+    if context_requires_virtualenv(context):
+        ensure_pyenv_virtualenv_plugin(pyenv_root_path, runner)
+        runner(
+            pyenv_command(
+                pyenv_root_path,
+                "virtualenv",
+                "--force",
+                context.base_version,
+                context.environment_name,
+            ),
+            env=env,
+        )
+    return selection_name(context)
+
+
 def write_python_version_file(repo_root: Path, environment_name: str) -> None:
     """Write `.python-version` so pyenv defaults to the runtime context."""
 

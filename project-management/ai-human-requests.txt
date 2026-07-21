@@ -15,3 +15,8 @@ Active Requests
 
 Completed Requests
 ------------------
+
+* 2026-07-20T23:28:52-07:00 - Completed: the operator ran
+  `./scripts/install_prerequisites.sh` and `./install.sh --mode dev` in a
+  normal Fedora terminal. The configured runtime was rebuilt with `_curses`
+  and the native terminal smoke test passed.

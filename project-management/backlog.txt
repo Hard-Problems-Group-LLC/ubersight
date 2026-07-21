@@ -4,4 +4,7 @@ Use this backlog to track pending tasks in priority order. The top item should
 be handled next. Mark each task with an asterisk followed by a blank line.
 Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
 
-*
+* 2026-07-20T23:32:25-07:00 - Design a project review-board process: define
+  roles, scope, trigger criteria, decision records, reviewer independence,
+  and its interaction with proposals and ACP. Owner: operator and Codex.
+  Requestor: operator. No active blocker.

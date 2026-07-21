@@ -1,7 +1,9 @@
 from pathlib import Path
 import importlib.util
 import io
+import json
 import os
+import subprocess
 from types import SimpleNamespace
 
 from scripts.python_environment_bootstrap import (
@@ -17,6 +19,7 @@ from scripts.python_environment_bootstrap import (
     ensure_pyenv_installed,
     ensure_pyenv_virtualenv_plugin,
     load_python_environment_config,
+    rebuild_pyenv_context,
     selection_name,
     shell_rc_path,
     upsert_managed_block,
@@ -96,18 +99,383 @@ def test_runtime_context_setup_does_not_install_bootstrap_floor(monkeypatch, tmp
     )
     monkeypatch.setattr(module, "ensure_pyenv_installed", lambda root, runner: None)
 
+    def unexpected_preflight():
+        """Fail if an existing pyenv build unnecessarily checks headers."""
+
+        raise AssertionError("existing pyenv runtimes must not need build headers")
+
+    monkeypatch.setattr(
+        module, "verify_curses_build_prerequisite", unexpected_preflight
+    )
+
     def fake_ensure_context(root, context, runner):
         """Record the runtime contexts requested by stage two."""
         installed_contexts.append(context)
         return context.environment_name
 
     monkeypatch.setattr(module, "ensure_pyenv_context", fake_ensure_context)
+    checked_runtimes = []
+    monkeypatch.setattr(
+        module,
+        "verify_curses_support",
+        lambda executable: checked_runtimes.append(executable),
+    )
 
     result = module.ensure_runtime_contexts(tmp_path)
 
     assert result == (pyenv_root, "3.14.6", runtime_python)
     assert installed_contexts == [runtime]
+    assert checked_runtimes == [runtime_python]
     assert (repo_root / ".python-version").read_text(encoding="utf-8") == "3.14.6\n"
+
+
+def test_runtime_context_checks_headers_before_building_pyenv(monkeypatch, tmp_path):
+    """Verify a new pyenv runtime checks native headers before compilation."""
+
+    module = load_install_stage_2_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    pyenv_root = tmp_path / ".pyenv"
+    runtime_python = pyenv_root / "versions" / "3.14.6" / "bin" / "python"
+    bootstrap = PythonContextConfig("3.9", "3.9.21", "3.9.21")
+    runtime = PythonContextConfig("3.12", "3.14.6", "3.14.6")
+    config = SimpleNamespace(bootstrap=bootstrap, runtime=runtime)
+    calls = []
+
+    monkeypatch.setattr(module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        module, "load_python_environment_config", lambda selected_root: config
+    )
+    monkeypatch.setattr(
+        module, "default_install_pyenv_root", lambda user_home: pyenv_root
+    )
+    monkeypatch.setattr(module, "ensure_pyenv_installed", lambda root, runner: None)
+    monkeypatch.setattr(
+        module,
+        "verify_curses_build_prerequisite",
+        lambda: calls.append("headers"),
+    )
+
+    def fake_ensure_context(root, context, runner):
+        """Create the controlled runtime after the preflight succeeds."""
+
+        calls.append("pyenv")
+        runtime_python.parent.mkdir(parents=True)
+        runtime_python.write_text("", encoding="utf-8")
+        return context.environment_name
+
+    monkeypatch.setattr(module, "ensure_pyenv_context", fake_ensure_context)
+    monkeypatch.setattr(module, "verify_curses_support", lambda executable: None)
+
+    assert module.ensure_runtime_contexts(tmp_path) == (
+        pyenv_root,
+        "3.14.6",
+        runtime_python,
+    )
+    assert calls == ["headers", "pyenv"]
+
+
+def test_runtime_context_rebuilds_existing_runtime_without_curses(
+    monkeypatch, tmp_path
+):
+    """Verify a known-bad runtime is rebuilt after its headers are available."""
+
+    module = load_install_stage_2_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    pyenv_root = tmp_path / ".pyenv"
+    runtime_python = pyenv_root / "versions" / "3.14.6" / "bin" / "python"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    bootstrap = PythonContextConfig("3.9", "3.9.21", "3.9.21")
+    runtime = PythonContextConfig("3.12", "3.14.6", "3.14.6")
+    config = SimpleNamespace(bootstrap=bootstrap, runtime=runtime)
+    calls = []
+
+    monkeypatch.setattr(module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        module, "load_python_environment_config", lambda selected_root: config
+    )
+    monkeypatch.setattr(
+        module, "default_install_pyenv_root", lambda user_home: pyenv_root
+    )
+    monkeypatch.setattr(module, "ensure_pyenv_installed", lambda root, runner: None)
+    monkeypatch.setattr(
+        module,
+        "ensure_pyenv_context",
+        lambda root, context, runner: calls.append("ensure")
+        or context.environment_name,
+    )
+    monkeypatch.setattr(
+        module,
+        "verify_curses_build_prerequisite",
+        lambda: calls.append("headers"),
+    )
+    monkeypatch.setattr(
+        module,
+        "rebuild_pyenv_context",
+        lambda root, context, runner: calls.append("rebuild")
+        or context.environment_name,
+    )
+    verification_count = {"value": 0}
+
+    def verify_curses(executable):
+        """Fail once so the test exercises the automatic repair path."""
+
+        assert executable == runtime_python
+        calls.append("verify")
+        verification_count["value"] += 1
+        if verification_count["value"] == 1:
+            raise module.CursesSupportError("missing _curses")
+
+    monkeypatch.setattr(module, "verify_curses_support", verify_curses)
+
+    assert module.ensure_runtime_contexts(tmp_path) == (
+        pyenv_root,
+        "3.14.6",
+        runtime_python,
+    )
+    assert calls == ["ensure", "verify", "headers", "rebuild", "verify"]
+    assert (repo_root / ".python-version").read_text(encoding="utf-8") == "3.14.6\n"
+
+
+def test_runtime_context_does_not_rebuild_without_curses_headers(monkeypatch, tmp_path):
+    """Verify a failed header preflight leaves an invalid runtime untouched."""
+
+    module = load_install_stage_2_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    pyenv_root = tmp_path / ".pyenv"
+    runtime_python = pyenv_root / "versions" / "3.14.6" / "bin" / "python"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    bootstrap = PythonContextConfig("3.9", "3.9.21", "3.9.21")
+    runtime = PythonContextConfig("3.12", "3.14.6", "3.14.6")
+    config = SimpleNamespace(bootstrap=bootstrap, runtime=runtime)
+    calls = []
+
+    monkeypatch.setattr(module, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        module, "load_python_environment_config", lambda selected_root: config
+    )
+    monkeypatch.setattr(
+        module, "default_install_pyenv_root", lambda user_home: pyenv_root
+    )
+    monkeypatch.setattr(module, "ensure_pyenv_installed", lambda root, runner: None)
+    monkeypatch.setattr(
+        module,
+        "ensure_pyenv_context",
+        lambda root, context, runner: calls.append("ensure")
+        or context.environment_name,
+    )
+    monkeypatch.setattr(
+        module,
+        "verify_curses_support",
+        lambda executable: (_ for _ in ()).throw(
+            module.CursesSupportError("missing _curses")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "verify_curses_build_prerequisite",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing curses.h")),
+    )
+    monkeypatch.setattr(
+        module,
+        "rebuild_pyenv_context",
+        lambda root, context, runner: (_ for _ in ()).throw(
+            AssertionError("rebuild must not run without headers")
+        ),
+    )
+
+    try:
+        module.ensure_runtime_contexts(tmp_path)
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("Expected the missing-header preflight to fail.")
+
+    assert message == "missing curses.h"
+    assert calls == ["ensure"]
+
+
+def test_rebuild_pyenv_context_forces_base_runtime_reinstallation(tmp_path):
+    """Verify an automatic repair asks pyenv to force-rebuild its base Python."""
+
+    pyenv_root = tmp_path / ".pyenv"
+    context = PythonContextConfig("3.12", "3.14.6", "3.14.6")
+    calls = []
+
+    def record(command, **kwargs):
+        """Record the pyenv command without invoking an actual rebuild."""
+
+        calls.append((list(command), kwargs))
+
+    assert rebuild_pyenv_context(pyenv_root, context, record) == "3.14.6"
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == [
+        str(pyenv_root / "bin" / "pyenv"),
+        "install",
+        "--force",
+        "3.14.6",
+    ]
+    assert kwargs["env"]["PYENV_ROOT"] == str(pyenv_root)
+
+
+def test_pyenv_rebuild_command_is_copyable():
+    """Verify a failed automatic repair reports the exact pyenv invocation."""
+
+    module = load_install_stage_2_module()
+    pyenv_root = Path("/managed/.pyenv")
+
+    assert module.pyenv_rebuild_command(pyenv_root, "3.14.6") == (
+        "PYENV_ROOT=/managed/.pyenv " "/managed/.pyenv/bin/pyenv install --force 3.14.6"
+    )
+
+
+def test_verify_curses_build_prerequisite_uses_configured_compiler(
+    monkeypatch,
+):
+    """Verify the preflight honors compiler and include-path configuration."""
+
+    module = load_install_stage_2_module()
+    commands = []
+    monkeypatch.setenv("CC", "ccache gcc")
+    monkeypatch.setenv("CPPFLAGS", "-I/custom/include")
+
+    def fake_run(command, **kwargs):
+        """Record a successful no-output header probe."""
+
+        commands.append((list(command), kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module.verify_curses_build_prerequisite()
+
+    assert commands == [
+        (
+            ["ccache", "gcc", "-I/custom/include", "-x", "c", "-fsyntax-only", "-"],
+            {
+                "cwd": module.REPO_ROOT,
+                "check": False,
+                "input": module.CURSES_BUILD_PROBE_SOURCE,
+                "capture_output": True,
+                "text": True,
+            },
+        )
+    ]
+
+
+def test_verify_curses_build_prerequisite_reports_missing_headers(monkeypatch):
+    """Verify a missing header stops pyenv before its source build starts."""
+
+    module = load_install_stage_2_module()
+
+    def fake_run(command, **_kwargs):
+        """Simulate the compiler error from an absent ncurses header."""
+
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "fatal error: curses.h: No such file or directory\n",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    try:
+        module.verify_curses_build_prerequisite()
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("Expected a missing-header prerequisite failure.")
+
+    assert "curses.h: No such file or directory" in message
+    assert "./scripts/install_prerequisites.sh" in message
+    assert "ncurses-devel" in message
+
+
+def test_verify_curses_support_uses_selected_runtime(monkeypatch):
+    """Verify installer capability checks run through the selected Python."""
+
+    module = load_install_stage_2_module()
+    commands = []
+    runtime_python = Path("/managed/python")
+
+    def fake_run(command, **kwargs):
+        """Record the runtime capability check without launching Python."""
+
+        commands.append((list(command), kwargs))
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    module.verify_curses_support(runtime_python)
+
+    assert commands == [
+        (
+            [str(runtime_python), "-c", "import curses"],
+            {"cwd": module.REPO_ROOT, "capture_output": True},
+        )
+    ]
+
+
+def test_verify_curses_support_reports_rebuild_path(monkeypatch):
+    """Verify missing native curses support gives actionable remediation."""
+
+    module = load_install_stage_2_module()
+    runtime_python = Path("/managed/python")
+
+    def fake_run(command, **_kwargs):
+        """Simulate a pyenv build that omitted the `_curses` extension."""
+
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            stderr="No module named '_curses'",
+        )
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    try:
+        module.verify_curses_support(runtime_python)
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("Expected a missing-curses runtime failure.")
+
+    assert "No module named '_curses'" in message
+    assert "./scripts/install_prerequisites.sh" in message
+    assert "ncurses-devel" in message
+    assert "libncursesw5-dev" in message
+    assert "ncurses" in message
+
+
+def test_verify_install_checks_curses_support(monkeypatch):
+    """Verify final installer verification checks terminal support too."""
+
+    module = load_install_stage_2_module()
+    runtime_python = Path("/managed/venv/bin/python")
+    commands = []
+    checked_runtimes = []
+
+    def fake_run(command, **kwargs):
+        """Record the ordinary version check without launching Python."""
+
+        commands.append((list(command), kwargs))
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "verify_curses_support",
+        lambda executable: checked_runtimes.append(executable),
+    )
+
+    module.verify_install(runtime_python)
+
+    assert commands == [([str(runtime_python), "--version"], {"cwd": module.REPO_ROOT})]
+    assert checked_runtimes == [runtime_python]
 
 
 def test_standard_virtualenv_keeps_matching_base_interpreter(monkeypatch, tmp_path):
@@ -357,6 +725,47 @@ def test_install_sh_preserves_existing_pyenv_checkout():
 
     assert 'pyenv_fallback_version="3.14.6"' in content
     assert 'git -C "$pyenv_root" pull --ff-only' not in content
+
+
+def test_install_sh_delegates_root_bootstrap_prerequisites():
+    """Verify root bootstrap uses the dedicated prerequisite installer."""
+
+    content = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert '"${repo_root}/scripts/install_prerequisites.sh"' in content
+    assert "detect_package_manager()" not in content
+
+
+def test_prerequisite_installer_plans_native_curses_dependencies():
+    """Verify the direct installer selects a platform-native curses package."""
+
+    installer = ROOT / "scripts" / "install_prerequisites.sh"
+    completed = subprocess.run(
+        [str(installer), "--json"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    plan = json.loads(completed.stdout)
+    expected_curses_packages = {
+        "apt-get": "libncursesw5-dev",
+        "dnf": "ncurses-devel",
+        "yum": "ncurses-devel",
+        "brew": "ncurses",
+    }
+
+    assert installer.is_file()
+    assert os.access(installer, os.X_OK)
+    assert plan["package_manager"] in expected_curses_packages
+    assert expected_curses_packages[plan["package_manager"]] in plan["packages"]
+
+    content = installer.read_text(encoding="utf-8")
+    assert "libncursesw5-dev" in content
+    assert "ncurses-devel" in content
+    assert "packages=(python git curl ncurses)" in content
+    assert "Rerun ./install.sh; it will rebuild" in content
+    assert "Rebuild any existing pyenv runtime" not in content
 
 
 def test_validation_runtime_preserves_venv_launcher_path():

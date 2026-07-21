@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -20,8 +21,10 @@ REPO_ROOT = SCRIPT_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+src_path = str(SRC_DIR)
+if src_path in sys.path:
+    sys.path.remove(src_path)
+sys.path.insert(0, src_path)
 
 from ubersight.install_scope import (  # noqa: E402
     default_pyenv_root as default_install_pyenv_root,
@@ -44,8 +47,10 @@ from python_environment_bootstrap import (  # noqa: E402
     ensure_pyenv_context,
     ensure_pyenv_installed,
     load_python_environment_config,
+    pyenv_command,
     pyenv_python_executable,
     pyenv_shell_init_snippet,
+    rebuild_pyenv_context,
     shell_rc_path,
     slugify_project_name,
     upsert_managed_block,
@@ -57,6 +62,12 @@ REPO_SCOPE = "repo"
 USER_SCOPE = "user"
 SYSTEM_SCOPE = "system"
 DIRENV_DOWNLOAD_TIMEOUT_SECONDS = 30
+CURSES_IMPORT_COMMAND = "import curses"
+CURSES_BUILD_PROBE_SOURCE = "#include <curses.h>\nint main(void) { return 0; }\n"
+
+
+class CursesSupportError(RuntimeError):
+    """Report that a selected Python runtime lacks Ubersight's curses support."""
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -197,12 +208,49 @@ def ensure_runtime_contexts(user_home: Path) -> Tuple[Path, str, Path]:
     )
     pyenv_root_path = default_install_pyenv_root(user_home)
     ensure_pyenv_installed(pyenv_root_path, run)
+    base_runtime_python = pyenv_python_executable(
+        pyenv_root_path,
+        config.runtime.base_version,
+    )
+    if not base_runtime_python.is_file():
+        verify_curses_build_prerequisite()
     runtime_selection = ensure_pyenv_context(pyenv_root_path, config.runtime, run)
     runtime_python = pyenv_python_executable(pyenv_root_path, runtime_selection)
     if not runtime_python.is_file():
         raise RuntimeError(
             "Expected runtime interpreter is missing: {}".format(runtime_python)
         )
+    try:
+        verify_curses_support(runtime_python)
+    except CursesSupportError:
+        verify_curses_build_prerequisite()
+        manual_command = pyenv_rebuild_command(
+            pyenv_root_path, config.runtime.base_version
+        )
+        print(
+            "[install-stage-2] Rebuilding pyenv runtime {} because it lacks "
+            "curses support.".format(config.runtime.base_version),
+            flush=True,
+        )
+        try:
+            runtime_selection = rebuild_pyenv_context(
+                pyenv_root_path, config.runtime, run
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError(
+                "Automatic pyenv rebuild failed. Resolve the build error, then "
+                "rerun ./install.sh. Equivalent manual command: {}".format(
+                    manual_command
+                )
+            ) from error
+        runtime_python = pyenv_python_executable(pyenv_root_path, runtime_selection)
+        if not runtime_python.is_file():
+            raise RuntimeError(
+                "Expected rebuilt runtime interpreter is missing: {}".format(
+                    runtime_python
+                )
+            )
+        verify_curses_support(runtime_python)
     write_python_version_file(REPO_ROOT, runtime_selection)
     return pyenv_root_path, runtime_selection, runtime_python
 
@@ -531,10 +579,97 @@ def allow_direnv(direnv_path: Path, envrc_path: Path) -> None:
     run([str(direnv_path), "allow", str(envrc_path.parent)], cwd=REPO_ROOT, env=env)
 
 
+def _compact_failure_detail(stdout: str, stderr: str) -> str:
+    """Return the final diagnostic line from one failed child process."""
+
+    details = (stderr or stdout).strip()
+    return details.splitlines()[-1] if details else ""
+
+
+def _curses_build_probe_command() -> list[str]:
+    """Build a no-output compiler probe for the native curses header."""
+
+    compiler = shlex.split(os.environ.get("CC", "cc"))
+    cppflags = shlex.split(os.environ.get("CPPFLAGS", ""))
+    return [*compiler, *cppflags, "-x", "c", "-fsyntax-only", "-"]
+
+
+def pyenv_rebuild_command(pyenv_root_path: Path, base_version: str) -> str:
+    """Return a copyable pyenv rebuild command for an interrupted repair."""
+
+    command = pyenv_command(pyenv_root_path, "install", "--force", base_version)
+    return "PYENV_ROOT={} {}".format(
+        shlex.quote(str(pyenv_root_path)), shlex.join(command)
+    )
+
+
+def verify_curses_build_prerequisite() -> None:
+    """Require usable curses headers before pyenv compiles a new runtime.
+
+    CPython silently omits `_curses` when its headers are absent. A syntax-only
+    compiler probe catches that condition before pyenv starts a lengthy source
+    build, while honoring the caller's configured compiler and include flags.
+    """
+
+    command = _curses_build_probe_command()
+    try:
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=False,
+            input=CURSES_BUILD_PROBE_SOURCE,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RuntimeError(
+            "Unable to run the compiler needed to verify curses headers: {}. "
+            "Run ./scripts/install_prerequisites.sh to install the host build "
+            "prerequisites, then rerun ./install.sh.".format(error)
+        ) from error
+    if result.returncode != 0:
+        details = _compact_failure_detail(result.stdout, result.stderr)
+        detail_suffix = ": {}".format(details) if details else ""
+        raise RuntimeError(
+            "Cannot compile a curses header probe{}; run "
+            "./scripts/install_prerequisites.sh before pyenv builds the "
+            "runtime. It installs ncurses development headers (Fedora/Rocky: "
+            "`ncurses-devel`; Debian/Ubuntu: `libncursesw5-dev`; "
+            "macOS/Homebrew: `ncurses`).".format(detail_suffix)
+        )
+
+
+def verify_curses_support(python_executable: Path) -> None:
+    """Require the selected runtime to support Ubersight's terminal UI.
+
+    A pyenv source build can complete without optional native extensions when
+    its corresponding development headers are absent. Checking the actual
+    interpreter keeps the installer from reporting success for a runtime that
+    cannot start Ubersight's curses dashboard.
+    """
+
+    command = [str(python_executable), "-c", CURSES_IMPORT_COMMAND]
+    try:
+        run(command, cwd=REPO_ROOT, capture_output=True)
+    except subprocess.CalledProcessError as error:
+        details = _compact_failure_detail(error.stdout or "", error.stderr or "")
+        detail_suffix = ": {}".format(details) if details else ""
+        raise CursesSupportError(
+            "Selected Python runtime cannot import curses{}; Ubersight needs "
+            "native terminal support. Run ./scripts/install_prerequisites.sh "
+            "to install ncurses development headers (Fedora/Rocky: "
+            "`ncurses-devel`; Debian/Ubuntu: `libncursesw5-dev`; "
+            "macOS/Homebrew: `ncurses`), then rerun ./install.sh. The "
+            "development installer will rebuild the selected pyenv runtime "
+            "automatically.".format(detail_suffix)
+        ) from error
+
+
 def verify_install(venv_python: Path) -> None:
-    """Run minimal post-bootstrap verification."""
+    """Verify the installed environment and its required terminal support."""
 
     run([str(venv_python), "--version"], cwd=REPO_ROOT)
+    verify_curses_support(venv_python)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

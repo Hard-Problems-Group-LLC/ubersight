@@ -44,3 +44,8 @@ Upcoming slices:
 * Slice 6: Harden status-writer validation, planned.
 * Slice 7: Broaden dashboard smoke coverage, planned.
 * Slice 8: Polish install and update workflow, planned.
+
+## Current Work
+
+Native terminal prerequisite repair is complete and verified. The current
+change set is ready for the requested ACP workflow.

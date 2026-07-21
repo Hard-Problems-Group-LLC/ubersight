@@ -73,47 +73,8 @@ has_flag() {
   return 1
 }
 
-detect_package_manager() {
-  if command -v apt-get >/dev/null 2>&1; then
-    printf 'apt-get\n'
-    return 0
-  fi
-  if command -v dnf >/dev/null 2>&1; then
-    printf 'dnf\n'
-    return 0
-  fi
-  if command -v yum >/dev/null 2>&1; then
-    printf 'yum\n'
-    return 0
-  fi
-  if command -v brew >/dev/null 2>&1; then
-    printf 'brew\n'
-    return 0
-  fi
-  return 1
-}
-
 install_root_dependencies() {
-  local manager="$1"
-  if [[ "$manager" == "apt-get" ]]; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      python3 python3-pip python3-venv git curl ca-certificates \
-      build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
-      libsqlite3-dev libffi-dev liblzma-dev tk-dev xz-utils
-    return 0
-  fi
-
-  if [[ "$manager" == "brew" ]]; then
-    brew update
-    brew install python git curl
-    return 0
-  fi
-
-  "$manager" install -y \
-    python3 python3-pip git curl ca-certificates gcc make patch \
-    zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel \
-    openssl-devel libffi-devel xz xz-devel tk-devel findutils
+  "${repo_root}/scripts/install_prerequisites.sh"
 }
 
 ensure_user_pyenv_python() {
@@ -206,12 +167,7 @@ main() {
     :
   else
     if [[ "$is_root" == "1" ]]; then
-      local manager
-      manager="$(detect_package_manager)" || {
-        echo "install.sh: unsupported package manager." >&2
-        return 1
-      }
-      install_root_dependencies "$manager"
+      install_root_dependencies
       python_path="$(find_python)" || {
         echo "install.sh: package-manager install did not provide Python 3.9+." >&2
         return 1

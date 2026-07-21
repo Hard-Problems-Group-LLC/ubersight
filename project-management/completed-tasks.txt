@@ -4,6 +4,13 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-07-20T23:28:52-07:00 - Repaired the Fedora development installer path
+  that built pyenv Python 3.14.6 without `_curses`. Added the direct
+  cross-platform prerequisite installer, automatic pyenv recovery after the
+  header preflight, and regression coverage. The operator completed the host
+  prerequisite installation; the rebuilt runtime imported curses and passed a
+  real terminal smoke test plus all required checks (105 tests).
+
 * 2026-07-10T04:14:15-07:00 - Refined the shared modernization guide after
   the final ordinary development install. Corrected unsafe real-home sentinel
   advice, distinguished default and explicit HOME acceptance, documented
