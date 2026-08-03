@@ -25,8 +25,9 @@ Added the missing distribution package prerequisites to
 `scripts/install_prerequisites.sh` and made root bootstrap delegate to that
 installer. Stage two now validates `curses`, preserves source-package import
 precedence, checks native headers before new pyenv builds, and automatically
-force-rebuilds a configured pyenv runtime that lacks curses after prerequisites
-are available.
+rebuilds a configured pyenv runtime that lacks curses after prerequisites are
+available. Rebuilds now preserve the prior prefix and restore it when the fresh
+installation or validation fails.
 
 ## Verification
 

@@ -7,6 +7,17 @@ summary, `Root cause:` analysis, and `Resolution:` notes. Add commit or test
 references when they help trace the fix. Keep any detailed closure records
 aligned under `closed/`.
 
+* 2026-08-03T15:05:24-07:00 - Shared pyenv interpreter corruption recovery.
+  The configured Python 3.14.6 launcher was truncated to zero bytes, breaking
+  every project and virtual environment based on that shared runtime. Root
+  cause: Bash replayed terminal transcript lines and interpreted installer
+  `->` markers as output redirection into a virtual-environment Python symlink.
+  Resolution: repaired the real runtime, added runnable exact-version probes,
+  physical-interpreter stage-one fallback, explicit
+  `--rebuild-broken-pyenv` authorization, transactional prefix preservation and
+  rollback, shell-neutral `RUN:` diagnostics, and regression coverage.
+  Details: `closed/shared-pyenv-interpreter-corruption.md`
+
 * 2026-07-10T04:04:40-07:00 - Rocky Linux 10.2 transplant recovery. A
   transplanted Python 3.12.12 venv, implicit bootstrap ownership, and a
   missing generated

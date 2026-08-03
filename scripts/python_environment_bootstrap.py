@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence
 
@@ -242,32 +244,103 @@ def rebuild_pyenv_context(
     pyenv_root_path: Path,
     context: PythonContextConfig,
     runner: Callable[..., subprocess.CompletedProcess],
+    validator: Optional[Callable[[Path], None]] = None,
 ) -> str:
-    """Force-rebuild one configured pyenv context after a failed capability check.
+    """Transactionally rebuild one configured pyenv context.
 
-    This deliberately reuses the normal context-selection rules so legacy
-    pyenv-virtualenv configurations are recreated after their base Python is
-    rebuilt.
+    Existing prefixes are moved aside before pyenv starts so a failed or
+    interrupted build cannot overwrite the last installed runtime in place.
+    The previous prefixes are restored when installation or validation fails.
     """
 
     env = pyenv_environment(pyenv_root_path)
-    runner(
-        pyenv_command(pyenv_root_path, "install", "--force", context.base_version),
-        env=env,
-    )
+    version_root = pyenv_root_path / "versions"
+    selection = selection_name(context)
+    prefix_names = [context.base_version]
     if context_requires_virtualenv(context):
-        ensure_pyenv_virtualenv_plugin(pyenv_root_path, runner)
+        prefix_names.append(context.environment_name)
+    prefixes = [version_root / name for name in prefix_names]
+    backups = []
+
+    try:
+        for prefix in prefixes:
+            if not os.path.lexists(str(prefix)):
+                continue
+            backup = _unused_pyenv_backup_path(prefix)
+            prefix.rename(backup)
+            backups.append((prefix, backup))
+
         runner(
-            pyenv_command(
-                pyenv_root_path,
-                "virtualenv",
-                "--force",
-                context.base_version,
-                context.environment_name,
-            ),
+            pyenv_command(pyenv_root_path, "install", context.base_version),
             env=env,
         )
-    return selection_name(context)
+        if context_requires_virtualenv(context):
+            ensure_pyenv_virtualenv_plugin(pyenv_root_path, runner)
+            runner(
+                pyenv_command(
+                    pyenv_root_path,
+                    "virtualenv",
+                    context.base_version,
+                    context.environment_name,
+                ),
+                env=env,
+            )
+        if validator is not None:
+            validator(pyenv_python_executable(pyenv_root_path, selection))
+    except BaseException:
+        try:
+            _restore_pyenv_prefixes(prefixes, backups)
+        except OSError as rollback_error:
+            backup_list = ", ".join(str(backup) for _, backup in backups)
+            raise RuntimeError(
+                "Pyenv rebuild failed and automatic rollback also failed. "
+                "Preserved backup paths: {}".format(backup_list or "none")
+            ) from rollback_error
+        raise
+
+    for _, backup in backups:
+        try:
+            _remove_pyenv_prefix(backup)
+        except OSError as error:
+            warnings.warn(
+                "Rebuilt pyenv successfully but could not remove backup {}: {}".format(
+                    backup, error
+                ),
+                RuntimeWarning,
+            )
+    return selection
+
+
+def _unused_pyenv_backup_path(prefix: Path) -> Path:
+    """Return a nonexisting sibling path for one preserved pyenv prefix."""
+
+    stem = ".{}.ubersight-backup-{}".format(prefix.name, os.getpid())
+    candidate = prefix.with_name(stem)
+    sequence = 1
+    while os.path.lexists(str(candidate)):
+        candidate = prefix.with_name("{}-{}".format(stem, sequence))
+        sequence += 1
+    return candidate
+
+
+def _remove_pyenv_prefix(path: Path) -> None:
+    """Remove one known pyenv prefix or symlink during rebuild cleanup."""
+
+    if not os.path.lexists(str(path)):
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
+def _restore_pyenv_prefixes(prefixes: Sequence[Path], backups: Sequence[tuple]) -> None:
+    """Discard failed replacements and restore preserved pyenv prefixes."""
+
+    for prefix in reversed(prefixes):
+        _remove_pyenv_prefix(prefix)
+    for prefix, backup in reversed(backups):
+        backup.rename(prefix)
 
 
 def write_python_version_file(repo_root: Path, environment_name: str) -> None:

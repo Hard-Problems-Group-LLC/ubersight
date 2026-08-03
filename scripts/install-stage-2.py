@@ -39,6 +39,7 @@ from python_environment_bootstrap import (  # noqa: E402
     DIRENV_END,
     PYENV_INIT_BEGIN,
     PYENV_INIT_END,
+    PythonContextConfig,
     build_direnv_hook_block,
     build_envrc_content,
     detect_shell_name,
@@ -47,7 +48,6 @@ from python_environment_bootstrap import (  # noqa: E402
     ensure_pyenv_context,
     ensure_pyenv_installed,
     load_python_environment_config,
-    pyenv_command,
     pyenv_python_executable,
     pyenv_shell_init_snippet,
     rebuild_pyenv_context,
@@ -64,10 +64,31 @@ SYSTEM_SCOPE = "system"
 DIRENV_DOWNLOAD_TIMEOUT_SECONDS = 30
 CURSES_IMPORT_COMMAND = "import curses"
 CURSES_BUILD_PROBE_SOURCE = "#include <curses.h>\nint main(void) { return 0; }\n"
+PYTHON_RUNTIME_PROBE = (
+    "import sys; " "print('.'.join(str(part) for part in sys.version_info[:3]))"
+)
 
 
 class CursesSupportError(RuntimeError):
     """Report that a selected Python runtime lacks Ubersight's curses support."""
+
+
+class PythonRuntimeError(RuntimeError):
+    """Report that a selected Python executable is missing or unusable."""
+
+
+def broken_pyenv_rebuild_required(
+    python_executable: Path,
+    error: PythonRuntimeError,
+) -> RuntimeError:
+    """Build the guarded-repair error shown for an unusable pyenv runtime."""
+
+    return RuntimeError(
+        "Detected an unusable configured pyenv runtime at {}: {}. The "
+        "installer did not modify that runtime. Rerun the same install "
+        "command with --rebuild-broken-pyenv to authorize a transactional "
+        "rebuild.".format(python_executable, error)
+    )
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -134,6 +155,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Bypass the stage-1 guard for explicit debugging.",
     )
+    parser.add_argument(
+        "--rebuild-broken-pyenv",
+        action="store_true",
+        help=(
+            "Authorize replacement of a configured pyenv runtime that exists "
+            "but fails its interpreter integrity probe. Without this flag the "
+            "installer reports the damage and exits without rebuilding it."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -197,7 +227,10 @@ def ensure_submodules(skip: bool) -> None:
     run(["git", "submodule", "update", "--init", "--recursive"], cwd=REPO_ROOT)
 
 
-def ensure_runtime_contexts(user_home: Path) -> Tuple[Path, str, Path]:
+def ensure_runtime_contexts(
+    user_home: Path,
+    rebuild_broken_pyenv: bool = False,
+) -> Tuple[Path, str, Path]:
     """Install the configured bootstrap and runtime pyenv contexts."""
 
     config = load_python_environment_config(REPO_ROOT)
@@ -216,43 +249,70 @@ def ensure_runtime_contexts(user_home: Path) -> Tuple[Path, str, Path]:
         verify_curses_build_prerequisite()
     runtime_selection = ensure_pyenv_context(pyenv_root_path, config.runtime, run)
     runtime_python = pyenv_python_executable(pyenv_root_path, runtime_selection)
-    if not runtime_python.is_file():
-        raise RuntimeError(
-            "Expected runtime interpreter is missing: {}".format(runtime_python)
+    try:
+        verify_python_runtime(runtime_python, config.runtime.base_version)
+    except PythonRuntimeError as error:
+        if not rebuild_broken_pyenv:
+            raise broken_pyenv_rebuild_required(runtime_python, error) from error
+        verify_curses_build_prerequisite()
+        print(
+            "[install-stage-2] Rebuilding unusable pyenv runtime {} after "
+            "explicit --rebuild-broken-pyenv authorization.".format(
+                config.runtime.base_version
+            ),
+            flush=True,
         )
+        runtime_selection = rebuild_runtime_context(
+            pyenv_root_path,
+            config.runtime,
+        )
+        runtime_python = pyenv_python_executable(pyenv_root_path, runtime_selection)
+        write_python_version_file(REPO_ROOT, runtime_selection)
+        return pyenv_root_path, runtime_selection, runtime_python
+
     try:
         verify_curses_support(runtime_python)
     except CursesSupportError:
         verify_curses_build_prerequisite()
-        manual_command = pyenv_rebuild_command(
-            pyenv_root_path, config.runtime.base_version
-        )
         print(
             "[install-stage-2] Rebuilding pyenv runtime {} because it lacks "
             "curses support.".format(config.runtime.base_version),
             flush=True,
         )
         try:
-            runtime_selection = rebuild_pyenv_context(
-                pyenv_root_path, config.runtime, run
+            runtime_selection = rebuild_runtime_context(
+                pyenv_root_path,
+                config.runtime,
             )
         except (OSError, subprocess.CalledProcessError) as error:
             raise RuntimeError(
                 "Automatic pyenv rebuild failed. Resolve the build error, then "
-                "rerun ./install.sh. Equivalent manual command: {}".format(
-                    manual_command
-                )
+                "rerun the original ./install.sh command; the installer will "
+                "preserve and validate the live prefix transactionally."
             ) from error
         runtime_python = pyenv_python_executable(pyenv_root_path, runtime_selection)
-        if not runtime_python.is_file():
-            raise RuntimeError(
-                "Expected rebuilt runtime interpreter is missing: {}".format(
-                    runtime_python
-                )
-            )
-        verify_curses_support(runtime_python)
     write_python_version_file(REPO_ROOT, runtime_selection)
     return pyenv_root_path, runtime_selection, runtime_python
+
+
+def rebuild_runtime_context(
+    pyenv_root_path: Path,
+    context: PythonContextConfig,
+) -> str:
+    """Rebuild and validate one configured runtime before discarding its backup."""
+
+    def validate(candidate: Path) -> None:
+        """Require both interpreter integrity and Ubersight terminal support."""
+
+        verify_python_runtime(candidate, context.base_version)
+        verify_curses_support(candidate)
+
+    return rebuild_pyenv_context(
+        pyenv_root_path,
+        context,
+        run,
+        validator=validate,
+    )
 
 
 def ensure_repo_venv(runtime_python: Path) -> Path:
@@ -384,11 +444,28 @@ def preferred_standard_base_python(
 def ensure_standard_install_venv(
     scope: str,
     user_home: Optional[Path] = None,
+    rebuild_broken_pyenv: bool = False,
 ) -> Tuple[Path, Path, Path]:
     """Create or refresh the user or system venv used for standard installs."""
 
     venv_path = standard_install_venv_path(scope, user_home)
     base_python = preferred_standard_base_python(scope, user_home)
+    if scope == USER_SCOPE:
+        config = load_python_environment_config(REPO_ROOT)
+        configured_python = pyenv_python_executable(
+            default_install_pyenv_root(user_home),
+            config.runtime.environment_name,
+        )
+        if base_python == configured_python:
+            try:
+                verify_python_runtime(base_python, config.runtime.base_version)
+            except PythonRuntimeError as error:
+                if not rebuild_broken_pyenv:
+                    raise broken_pyenv_rebuild_required(base_python, error) from error
+                _, _, base_python = ensure_runtime_contexts(
+                    user_home,
+                    rebuild_broken_pyenv=True,
+                )
     venv_python = ensure_virtualenv(base_python, venv_path)
     install_build_bootstrap(venv_python)
     return venv_path, venv_python, base_python
@@ -594,15 +671,6 @@ def _curses_build_probe_command() -> list[str]:
     return [*compiler, *cppflags, "-x", "c", "-fsyntax-only", "-"]
 
 
-def pyenv_rebuild_command(pyenv_root_path: Path, base_version: str) -> str:
-    """Return a copyable pyenv rebuild command for an interrupted repair."""
-
-    command = pyenv_command(pyenv_root_path, "install", "--force", base_version)
-    return "PYENV_ROOT={} {}".format(
-        shlex.quote(str(pyenv_root_path)), shlex.join(command)
-    )
-
-
 def verify_curses_build_prerequisite() -> None:
     """Require usable curses headers before pyenv compiles a new runtime.
 
@@ -665,6 +733,47 @@ def verify_curses_support(python_executable: Path) -> None:
         ) from error
 
 
+def verify_python_runtime(
+    python_executable: Path,
+    expected_version: str,
+) -> None:
+    """Require a nonempty executable that reports the configured Python version."""
+
+    try:
+        file_size = python_executable.stat().st_size
+    except OSError as error:
+        raise PythonRuntimeError("interpreter file is missing or unreadable") from error
+    if file_size == 0:
+        raise PythonRuntimeError("interpreter file is empty")
+    if not python_executable.is_file():
+        raise PythonRuntimeError("interpreter path is not a regular file")
+    if not os.access(python_executable, os.X_OK):
+        raise PythonRuntimeError("interpreter file is not executable")
+
+    command = [str(python_executable), "-c", PYTHON_RUNTIME_PROBE]
+    try:
+        completed = run(command, cwd=REPO_ROOT, capture_output=True)
+    except OSError as error:
+        raise PythonRuntimeError(
+            "interpreter could not be executed: {}".format(error)
+        ) from error
+    except subprocess.CalledProcessError as error:
+        details = _compact_failure_detail(error.stdout or "", error.stderr or "")
+        detail_suffix = ": {}".format(details) if details else ""
+        raise PythonRuntimeError(
+            "interpreter probe failed{}".format(detail_suffix)
+        ) from error
+
+    reported_version = (completed.stdout or "").strip()
+    if reported_version != expected_version:
+        raise PythonRuntimeError(
+            "interpreter reported Python {}, expected {}".format(
+                reported_version or "an empty version",
+                expected_version,
+            )
+        )
+
+
 def verify_install(venv_python: Path) -> None:
     """Verify the installed environment and its required terminal support."""
 
@@ -696,7 +805,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ensure_submodules(args.skip_submodule_init)
         if scope == REPO_SCOPE:
             pyenv_root_path, runtime_selection, runtime_python = (
-                ensure_runtime_contexts(target_user_home)
+                ensure_runtime_contexts(
+                    target_user_home,
+                    rebuild_broken_pyenv=args.rebuild_broken_pyenv,
+                )
             )
             venv_python = ensure_repo_venv(runtime_python)
             install_venv = REPO_ROOT / ".venv"
@@ -719,7 +831,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 allow_direnv(direnv_path, envrc_path)
         else:
             install_venv, venv_python, selected_base_python = (
-                ensure_standard_install_venv(scope, target_user_home)
+                ensure_standard_install_venv(
+                    scope,
+                    target_user_home,
+                    rebuild_broken_pyenv=args.rebuild_broken_pyenv,
+                )
             )
             install_project(
                 venv_python,

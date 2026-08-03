@@ -34,9 +34,10 @@ then failed because `_curses` was absent.
   must first use the configured compiler and include flags to verify that a
   native curses header is available.
 - When an existing development runtime lacks `curses`, stage two must check
-  those headers, force-rebuild the configured pyenv context automatically,
-  and verify the rebuilt interpreter before continuing. If that rebuild fails,
-  it must print the exact manual pyenv command.
+  those headers, transactionally rebuild the configured pyenv context
+  automatically, and verify the rebuilt interpreter before continuing. If that
+  rebuild fails, it must restore the previous prefix and print the exact manual
+  pyenv command.
 - Standard installs must validate the final managed virtual environment.
 - A failed check must give a concise, platform-relevant rebuild path and must
   not silently borrow another interpreter or elevate privileges.

@@ -37,7 +37,7 @@ def run(command: Sequence[object], *, repo_root: Path) -> None:
     """Run one installer command from the repository root."""
 
     printable = " ".join(str(part) for part in command)
-    print(f"[install-project] -> {printable}")
+    print(f"[install-project] RUN: {printable}")
     subprocess.run([str(part) for part in command], cwd=repo_root, check=True)
 
 

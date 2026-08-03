@@ -4,6 +4,14 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-08-03T15:05:24-07:00 - Repaired and hardened shared-pyenv corruption
+  recovery. Added explicit integrity detection, guarded transactional rebuilds,
+  rollback coverage, physical-interpreter fallback, and shell-neutral installer
+  command logs. Rebuilt and validated Python 3.14.6, traced the incident to a
+  replayed terminal transcript whose `->` markers became Bash redirections,
+  and filed the shared logging hazard for TheKnowledge follow-up. Owner: Codex
+  and operator.
+
 * 2026-07-20T23:28:52-07:00 - Repaired the Fedora development installer path
   that built pyenv Python 3.14.6 without `_curses`. Added the direct
   cross-platform prerequisite installer, automatic pyenv recovery after the

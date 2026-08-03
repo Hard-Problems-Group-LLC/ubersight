@@ -1825,6 +1825,29 @@ def test_project_install_preserves_python_symlink_path(tmp_path: Path) -> None:
     assert project_install.absolute_path_preserving_symlinks(link) != target.resolve()
 
 
+def test_project_install_command_log_avoids_shell_redirection(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    """Project install logs must not redirect into the venv interpreter."""
+
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        """Capture the child invocation without starting a process."""
+
+        calls.append((command, cwd, check))
+
+    monkeypatch.setattr(project_install.subprocess, "run", fake_run)
+    command = [tmp_path / "venv" / "bin" / "python", "--version"]
+
+    project_install.run(command, repo_root=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "[install-project] RUN:" in output
+    assert " -> " not in output
+    assert calls == [([str(part) for part in command], tmp_path, True)]
+
+
 def write_fake_proc(
     proc_root: Path,
     pid: int,

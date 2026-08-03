@@ -61,6 +61,26 @@ the command first.
 
 If an existing pyenv runtime was built without `_curses`, run the prerequisite
 installer and rerun `./install.sh --mode dev`. The installer verifies
-`import curses`, checks the native header, and automatically force-rebuilds the
-configured pyenv runtime when the header is available. It prints a copyable
-pyenv command only if that automatic rebuild fails.
+`import curses`, checks the native header, and transactionally rebuilds the
+configured pyenv runtime when the header is available. If that rebuild fails,
+resolve the reported build error and rerun the original installer command; do
+not force-rebuild the live prefix manually.
+
+The installer also verifies that a configured pyenv interpreter is nonempty,
+executable, runnable, and reports the configured patch release. If that
+integrity probe fails, installation stops without modifying the shared runtime.
+Review the reported path, then authorize recovery by adding the explicit flag
+to the same command:
+
+```bash
+./install.sh --mode dev --rebuild-broken-pyenv
+```
+
+Stage one can use a healthy physical system or alternate pyenv interpreter
+even when the active pyenv shims are broken. During authorized recovery, stage
+two moves the old runtime aside, builds and validates a fresh prefix, restores
+the old prefix if installation or validation fails, and removes the backup
+only after the replacement passes its version and `curses` probes.
+
+Installer command diagnostics use `RUN:` as a shell-neutral label. They are
+informational output, not a script to replay in a shell.

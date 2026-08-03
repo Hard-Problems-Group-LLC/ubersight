@@ -21,6 +21,9 @@ Options:
               usable Python interpreter is already available.
   --system    Pass through to stage 2 for a system-level standard install.
               Requires root or sudo and is invalid with development mode.
+  --rebuild-broken-pyenv
+              Authorize transactional replacement when the configured pyenv
+              interpreter exists but fails its integrity probe.
 
 All remaining options are passed through to scripts/install-stage-2.py.
 EOF
@@ -39,6 +42,20 @@ find_python() {
   for candidate in python3 python3.13 python3.12 python3.11 python3.10 python3.9 python; do
     if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
       command -v "$candidate"
+      return 0
+    fi
+  done
+
+  # A broken active pyenv selection makes every matching shim fail. Probe
+  # physical interpreters so stage 2 can diagnose and optionally repair it.
+  for candidate in \
+    /usr/local/bin/python3 \
+    /usr/bin/python3 \
+    /bin/python3 \
+    "${HOME}/.pyenv/versions/"*/bin/python3 \
+    "${HOME}/.pyenv/versions/"*/bin/python; do
+    if [[ -x "$candidate" ]] && python_is_supported "$candidate"; then
+      printf '%s\n' "$candidate"
       return 0
     fi
   done
@@ -93,8 +110,14 @@ ensure_user_pyenv_python() {
     git clone https://github.com/pyenv/pyenv.git "$pyenv_root"
   fi
   "$pyenv_bin" install -s "$pyenv_fallback_version"
-  printf '%s\n' \
-    "${pyenv_root}/versions/${pyenv_fallback_version}/bin/python"
+  local runtime_python="${pyenv_root}/versions/${pyenv_fallback_version}/bin/python"
+  if ! python_is_supported "$runtime_python"; then
+    echo "install.sh: configured pyenv runtime is unusable: ${runtime_python}" >&2
+    echo "install.sh: a separate healthy Python 3.9+ interpreter is required" >&2
+    echo "install.sh: to run the guarded --rebuild-broken-pyenv repair." >&2
+    return 1
+  fi
+  printf '%s\n' "$runtime_python"
 }
 
 confirm_root_user_install() {

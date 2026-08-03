@@ -21,13 +21,18 @@ Recent phases:
 * Phase 1: Standalone package foundation, done.
 * Phase 2: Side-window dashboard runtime, done.
 * Phase 3: Operator context safety panels, done.
-* Phase 4: Roadmap-backed status workflow, active.
+* Phase 4: Roadmap-backed status workflow, done.
+* Phase 9: Release and install polish, done.
+* Phase 10: Execution-layer failure forensics, done.
 
 Recent and active slices:
 
 * Slice 1: Establish package layout and launchers, done.
 * Slice 2: Restore managed quality-gate files, done.
-* Slice 3: Add roadmap-backed status convention, active.
+* Slice 3: Add roadmap-backed status convention, done.
+* Slice 8: Polish install and update workflow, done.
+* Slice 9: Investigate executable truncation, done.
+* Slice 10: Harden command logs and recovery guidance, done.
 
 Upcoming phases:
 
@@ -35,7 +40,6 @@ Upcoming phases:
 * Phase 6: Background-job producer integration, planned.
 * Phase 7: Status-schema hardening and validation, planned.
 * Phase 8: Dashboard usability refinement, planned.
-* Phase 9: Release and install polish, planned.
 
 Upcoming slices:
 
@@ -43,9 +47,10 @@ Upcoming slices:
 * Slice 5: Document consuming-project onboarding, planned.
 * Slice 6: Harden status-writer validation, planned.
 * Slice 7: Broaden dashboard smoke coverage, planned.
-* Slice 8: Polish install and update workflow, planned.
 
 ## Current Work
 
-Native terminal prerequisite repair is complete and verified. The current
-change set is ready for the requested ACP workflow.
+Guarded shared-pyenv corruption recovery repaired the live Python 3.14.6
+runtime and passed the uncached full quality gate. Phase 10 forensics traced
+the damage to replayed installer output whose `->` marker became Bash output
+redirection. Slice 10 replaced that marker locally and filed upstream guidance.

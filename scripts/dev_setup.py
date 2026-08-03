@@ -61,7 +61,7 @@ def venv_python_path(venv_path: Path) -> Path:
 
 def run(command: Sequence[object]) -> None:
     printable = " ".join(str(part) for part in command)
-    print(f"[dev-setup] -> {printable}")
+    print(f"[dev-setup] RUN: {printable}")
     subprocess.run([str(part) for part in command], cwd=REPO_ROOT, check=True)
 
 
