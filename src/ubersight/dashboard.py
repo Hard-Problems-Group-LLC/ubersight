@@ -2760,12 +2760,14 @@ def _opsec_footer_lines(
     is_public = operator_location is not None and _operator_location_is_public(
         operator_location
     )
+    # Centering only reads as a title inside the alarm's colored band; on
+    # plain routine rows it just looks like stray indentation.
     return _wrapped_labeled_status_lines(
         "OPSEC!" if is_public else "OPSEC",
         OPSEC_PUBLIC_FOOTER_TEXT if is_public else OPSEC_FOOTER_TEXT,
         width,
         max_lines_per_status,
-        center_first=True,
+        center_first=is_public,
     )
 
 
@@ -3287,7 +3289,9 @@ def _curses_attr_for_line(
         "WORK: PULL FIRST",
         "WORK: PULL",
     }:
-        return curses_module.color_pair(13) | curses_module.A_BOLD
+        # Black on yellow, deliberately not bold: PDCurses and terminals that
+        # render bold as bright turn bold black into low-contrast grey.
+        return curses_module.color_pair(13)
     if stripped in {"WORK: UNPUSHED COMMITS", "WORK: PUSH"}:
         return curses_module.color_pair(9) | curses_module.A_BOLD
     if stripped in {"WORK: CONFLICT"}:
@@ -3713,7 +3717,7 @@ def _run_curses(args: argparse.Namespace) -> int:
             # Routine OPSEC notes are informational: magenta text on the
             # pane background. Only the public-network alarm gets a band.
             curses.init_pair(12, curses.COLOR_MAGENTA, -1)
-            curses.init_pair(13, curses.COLOR_BLUE, curses.COLOR_YELLOW)
+            curses.init_pair(13, curses.COLOR_BLACK, curses.COLOR_YELLOW)
             curses.init_pair(14, curses.COLOR_BLACK, curses.COLOR_GREEN)
             curses.init_pair(15, curses.COLOR_BLACK, curses.COLOR_YELLOW)
             curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_RED)

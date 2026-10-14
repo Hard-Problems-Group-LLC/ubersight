@@ -1564,6 +1564,42 @@ def test_routine_opsec_is_text_only_while_public_alarm_keeps_its_band() -> None:
     assert ubersight._curses_line_text("OPSEC: short", 20) == "OPSEC: short"
 
 
+def test_local_work_banner_is_plain_black_on_yellow() -> None:
+    """The local/pull banner avoids bold, which greys out black text."""
+
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    for label in ("WORK: UNCOMMITTED LOCAL", "WORK: LOCAL", "WORK: PULL FIRST"):
+        assert ubersight._curses_attr_for_line(
+            FakeCurses, f"  {label}  ", True
+        ) == FakeCurses.color_pair(13)
+
+
+def test_only_the_public_opsec_alarm_centers_its_first_row() -> None:
+    """Routine OPSEC rows stay left-aligned; the alarm band centers its title."""
+
+    routine = ubersight._opsec_footer_lines(48, max_lines_per_status=3)
+    public = ubersight._opsec_footer_lines(
+        48,
+        max_lines_per_status=3,
+        operator_location=ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="Example Free Public WiFi",
+            location="Example City",
+        ),
+    )
+
+    assert all(line.startswith("OPSEC: ") for line in routine)
+    assert public[0].startswith(" ") and public[0].strip().startswith("OPSEC!: ")
+
+
 def test_tailscale_status_colors_reflect_state() -> None:
     class FakeCurses:
         A_BOLD = 1
