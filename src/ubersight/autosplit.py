@@ -986,7 +986,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             working_dir = Path.cwd()
         request = LayoutRequest(
             working_dir=working_dir,
-            dashboard_command=(sys.executable, "-m", "ubersight", *passthrough),
+            # The supervisor keeps the pane alive across `ubersight-stop`
+            # restart requests and crashes; Q still closes it.
+            dashboard_command=(
+                sys.executable,
+                "-m",
+                "ubersight",
+                "--supervise",
+                *passthrough,
+            ),
             ubersight_width=args.ubersight_width,
             console_height=args.console_height,
         )

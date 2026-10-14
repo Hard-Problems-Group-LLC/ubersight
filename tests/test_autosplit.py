@@ -724,7 +724,7 @@ def test_dry_run_prints_plan_and_passes_dashboard_arguments(
     assert plan["backend"] == "tmux"
     first = plan["steps"][0]["argv"]
     assert first[first.index("-c") + 1] == str(WORKDIR)
-    assert first[-3:] == ["-m", "ubersight", "--no-geolocate"]
+    assert first[-4:] == ["-m", "ubersight", "--supervise", "--no-geolocate"]
 
 
 def test_text_dry_run_prints_run_lines(monkeypatch, capsys) -> None:

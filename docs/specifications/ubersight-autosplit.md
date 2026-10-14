@@ -37,9 +37,12 @@ ubersight-autosplit [--backend auto|tmux|screen|wezterm|kitty|terminator|windows
 - `--ubersight-width` is the dashboard's share of the window width.
   `--console-height` is the console's share of the left column. Both
   accept 0.1 through 0.9.
-- The dashboard runs as `<current Python> -m ubersight UBERSIGHT_ARGS`, using
-  absolute paths. A pane started by a terminal server does not inherit the
-  caller's `PATH` or activated virtual environment.
+- The dashboard runs as
+  `<current Python> -m ubersight --supervise UBERSIGHT_ARGS`, using absolute
+  paths. A pane started by a terminal server does not inherit the caller's
+  `PATH` or activated virtual environment.
+- The supervisor keeps the pane alive: `ubersight-stop` restart requests
+  and crashes restart the dashboard in place, and Q closes the pane.
 - `--dry-run` prints `RUN:` lines without changing anything. These are
   shell-neutral labels, not a script. `--json` prints the plan as JSON.
 

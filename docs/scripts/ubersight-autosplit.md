@@ -74,5 +74,7 @@ host first, then run it there.
 ## Side Effects
 
 The command only creates panes or windows in the current terminal and
-starts `python -m ubersight` in the project directory. It does not modify
-project files. Panes created before a failed step are left open.
+starts `python -m ubersight --supervise` in the project directory. The
+supervisor restarts the dashboard after `ubersight-stop` requests and
+after crashes, and Q closes the pane. The command does not modify project
+files. Panes created before a failed step are left open.
