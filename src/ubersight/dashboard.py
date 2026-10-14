@@ -17,6 +17,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import textwrap
 import time
 from dataclasses import dataclass, replace
@@ -26,9 +27,17 @@ from typing import Any, Sequence
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from . import atomic_files
 from . import operator_location_memory_store as location_memory
+from . import windows_processes
 
 DEFAULT_STATUS_PATH = Path(".local/ubersight/status.json")
+# Windows keeps project-scoped runtime state under the project's ignored
+# `.local/` tree; POSIX hosts use a per-user runtime directory instead.
+# Material that must be visible across projects belongs under
+# `%LOCALAPPDATA%\ubersight` on Windows; nothing needs that today.
+WINDOWS_PROJECT_RUNTIME_ROOT = Path(".local/ubersight")
+GIT_SSH_BATCH_OPTIONS = "-o BatchMode=yes -o ConnectTimeout=5"
 DEFAULT_ORIGIN_CACHE_PATH = Path(".local/ubersight/origin-cache.json")
 DEFAULT_LOCATION_CACHE_PATH = Path(".local/ubersight/location-cache.json")
 DEFAULT_TAILSCALE_CACHE_PATH = Path(".local/ubersight/tailscale-cache.json")
@@ -248,25 +257,88 @@ def _timestamp_age_seconds(timestamp: datetime | None, now: datetime) -> float |
     return max(0.0, (now - timestamp.astimezone(now.tzinfo)).total_seconds())
 
 
+def _is_windows() -> bool:
+    """Return whether Ubersight is running on native Windows."""
+
+    return os.name == "nt"
+
+
+def _configured_git_ssh_command(cwd: Path | None) -> str:
+    """Return the repository's `core.sshCommand`, or an empty string."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "config", "--get", "core.sshCommand"],
+            cwd=str(cwd) if cwd is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _git_ssh_command(
+    env: dict[str, str],
+    cwd: Path | None,
+    *,
+    configured_ssh_command: Any = _configured_git_ssh_command,
+) -> str | None:
+    """Return the batch-mode `GIT_SSH_COMMAND` for a fetch, or `None`.
+
+    An environment `GIT_SSH_COMMAND` takes precedence over `core.sshCommand`,
+    so a blanket default would silently replace a user's configured SSH
+    client, such as Windows OpenSSH with its agent. Ubersight therefore keeps
+    an explicit environment choice, extends a configured command with batch
+    options, and only falls back to plain `ssh` when nothing is configured.
+    """
+
+    if env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH"):
+        return None
+    configured = configured_ssh_command(cwd)
+    if configured:
+        return f"{configured} {GIT_SSH_BATCH_OPTIONS}"
+    return f"ssh {GIT_SSH_BATCH_OPTIONS}"
+
+
 def _run_command(
     args: Sequence[str],
     *,
     cwd: Path | None = None,
     timeout_seconds: float = 10.0,
 ) -> CommandResult:
-    """Run a short local command without invoking a shell."""
+    """Run a short local command without invoking a shell.
+
+    Probes read from the null device so no command can consume the
+    dashboard's terminal input, and output is decoded as UTF-8 with
+    replacement so an unexpected byte cannot raise.
+    """
 
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=5")
+    # Only fetches reach a remote, so only they pay for the extra
+    # `git config` lookup that preserves a configured SSH client.
+    if tuple(args[:2]) == ("git", "fetch"):
+        ssh_command = _git_ssh_command(env, cwd)
+        if ssh_command is not None:
+            env["GIT_SSH_COMMAND"] = ssh_command
     try:
         completed = subprocess.run(
             list(args),
             cwd=str(cwd) if cwd is not None else None,
             env=env,
-            text=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             check=False,
         )
@@ -360,7 +432,7 @@ def load_status(path: Path) -> UbersightStatus:
             source_error="missing",
         )
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(atomic_files.read_text_with_retry(path))
     except OSError as exc:
         return UbersightStatus(
             phase_id="",
@@ -410,7 +482,6 @@ def _phase_to_mapping(phase_status: PhaseStatus) -> dict[str, str]:
 def write_status_file(status: UbersightStatus, path: Path) -> None:
     """Atomically write Ubersight status JSON."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": SCHEMA,
         "updated_at": _local_now().isoformat(timespec="seconds"),
@@ -421,11 +492,9 @@ def write_status_file(status: UbersightStatus, path: Path) -> None:
         "blocked": status.blocked,
         "complete": status.complete,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def parse_slice_option(value: str) -> SliceStatus:
@@ -533,7 +602,6 @@ def _load_origin_cache(path: Path) -> OriginStatus | None:
 
 
 def _write_origin_cache(path: Path, status: OriginStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": ORIGIN_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -542,11 +610,9 @@ def _write_origin_cache(path: Path, status: OriginStatus) -> None:
         "marker": status.marker,
         "details": status.details,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def _git_status_marker(
@@ -787,7 +853,6 @@ def _load_tailscale_cache(path: Path) -> TailscaleStatus | None:
 
 
 def _write_tailscale_cache(path: Path, status: TailscaleStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": TAILSCALE_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -796,11 +861,9 @@ def _write_tailscale_cache(path: Path, status: TailscaleStatus) -> None:
         "tailnet_alias": status.tailnet_alias,
         "details": status.details,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def _parse_tailscale_dns_alias(dns_name: str) -> str:
@@ -995,8 +1058,16 @@ def default_project_name(cwd: Path | None = None) -> str:
 
 
 def ubersight_runtime_root() -> Path:
-    """Return the per-user runtime root for Ubersight status files."""
+    """Return the runtime root for Ubersight background-job status files.
 
+    POSIX hosts use a per-user runtime directory shared by every project
+    context. Windows keeps project-scoped runtime state under the project's
+    ignored `.local/ubersight` tree, relative to the working directory like
+    the other Ubersight defaults.
+    """
+
+    if _is_windows():
+        return WINDOWS_PROJECT_RUNTIME_ROOT
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
     if xdg_runtime:
         return Path(xdg_runtime) / "ubersight"
@@ -1007,8 +1078,14 @@ def ubersight_runtime_root() -> Path:
 
 
 def ubersight_context_root(context: str | None = None) -> Path:
-    """Return a runtime context root such as `.../ubersight/example-app`."""
+    """Return a runtime context root such as `.../ubersight/example-app`.
 
+    On Windows the project-local runtime root already identifies the
+    project, so the context name selects only the banner, not a directory.
+    """
+
+    if _is_windows():
+        return ubersight_runtime_root()
     return ubersight_runtime_root() / _safe_context_name(
         context or default_project_name()
     )
@@ -1021,8 +1098,15 @@ def background_job_dir(context: str | None = None) -> Path:
 
 
 def _boot_id() -> str:
-    """Return Linux boot ID when available."""
+    """Return the Linux boot ID, or an empty string where none applies.
 
+    Windows process creation times are absolute and unique across boots, so
+    Windows needs no boot ID and returns an empty string, which disables
+    boot-ID comparison.
+    """
+
+    if _is_windows():
+        return ""
     try:
         return (
             Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
@@ -1032,8 +1116,16 @@ def _boot_id() -> str:
 
 
 def _process_start_ticks(pid: int) -> str:
-    """Return Linux `/proc/<pid>/stat` start ticks, or empty when unavailable."""
+    """Return a process start token, or an empty string when unavailable.
 
+    Linux reports `/proc/<pid>/stat` start ticks since boot. Windows reports
+    the process creation time as decimal FILETIME ticks, which producers can
+    read with `(Get-Process -Id $PID).StartTime.ToFileTimeUtc()`.
+    """
+
+    if _is_windows():
+        creation = windows_processes.process_creation_filetime(pid)
+        return "" if creation is None else str(creation)
     try:
         stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
     except OSError:
@@ -1056,6 +1148,10 @@ def _process_identity_is_live(
 ) -> bool:
     """Return whether `pid` appears to be the same live process."""
 
+    if _is_windows():
+        return _windows_process_identity_is_live(
+            pid, expected_start_ticks=expected_start_ticks
+        )
     proc_dir = Path("/proc") / str(pid)
     if not proc_dir.exists():
         return False
@@ -1065,6 +1161,32 @@ def _process_identity_is_live(
         current_start = _process_start_ticks(pid)
         if current_start and current_start != expected_start_ticks:
             return False
+    return True
+
+
+def _windows_process_identity_is_live(
+    pid: int,
+    *,
+    expected_start_ticks: str = "",
+    probe_process: Any = None,
+) -> bool:
+    """Return whether a Windows `pid` is still the recorded live process.
+
+    Only proof of exit, absence, or a different creation time counts as
+    dead. When Windows refuses inspection, the job file is kept rather than
+    deleting status for a process that may still be running.
+    """
+
+    probe = (probe_process or windows_processes.probe_process)(pid)
+    if probe.state in {
+        windows_processes.PROCESS_MISSING,
+        windows_processes.PROCESS_EXITED,
+    }:
+        return False
+    if probe.state != windows_processes.PROCESS_RUNNING:
+        return True
+    if expected_start_ticks and probe.creation_filetime is not None:
+        return str(probe.creation_filetime) == expected_start_ticks
     return True
 
 
@@ -1194,7 +1316,6 @@ def _load_location_cache(
 
 
 def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": LOCATION_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -1210,11 +1331,9 @@ def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
             status.network_observed_at or status.updated_at or _local_now()
         ).isoformat(timespec="seconds"),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def observe_operator_location(
@@ -2210,6 +2329,19 @@ def _read_uptime(proc_root: Path) -> float | None:
         return None
 
 
+def _clock_ticks_per_second() -> int:
+    """Return the `/proc` clock-tick rate, defaulting to Linux's usual 100.
+
+    Hosts without `os.sysconf`, such as Windows reading a test fixture tree,
+    use the default rate.
+    """
+
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is None:
+        return 100
+    return int(sysconf(os.sysconf_names["SC_CLK_TCK"]))
+
+
 def _read_process(
     pid: int, proc_root: Path, uptime_seconds: float | None
 ) -> WorkerProcess | None:
@@ -2235,7 +2367,7 @@ def _read_process(
     elapsed_seconds = None
     if uptime_seconds is not None and len(rest) > 19:
         try:
-            ticks_per_second = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+            ticks_per_second = _clock_ticks_per_second()
             start_ticks = int(rest[19])
             elapsed_seconds = max(
                 0.0, uptime_seconds - (start_ticks / ticks_per_second)
@@ -2263,13 +2395,63 @@ def _read_process(
     )
 
 
-def collect_process_tree(
-    root_pid: int | None, proc_root: Path = Path("/proc")
+def _collect_windows_process_tree(
+    root_pid: int,
+    *,
+    snapshot: Any = None,
+    probe_process: Any = None,
+    now_filetime: int | None = None,
 ) -> tuple[WorkerProcess, ...]:
-    """Return a best-effort process tree rooted at ``root_pid``."""
+    """Return a Windows process subtree from a Toolhelp snapshot.
+
+    Windows exposes no cheap run state comparable to Linux `/proc` states,
+    so each row shows `-`; the command is the executable name.
+    """
+
+    take_snapshot = snapshot or windows_processes.snapshot_processes
+    probe = probe_process or windows_processes.probe_process
+    creation_times: dict[int, int | None] = {}
+
+    def creation_time(pid: int) -> int | None:
+        if pid not in creation_times:
+            creation_times[pid] = probe(pid).creation_filetime
+        return creation_times[pid]
+
+    entries = windows_processes.build_process_tree(
+        root_pid, take_snapshot(), creation_time
+    )
+    now_ticks = (
+        windows_processes.current_filetime() if now_filetime is None else now_filetime
+    )
+    return tuple(
+        WorkerProcess(
+            pid=entry.pid,
+            ppid=entry.ppid,
+            state="-",
+            command=entry.exe_name or str(entry.pid),
+            elapsed_seconds=windows_processes.filetime_age_seconds(
+                creation_time(entry.pid), now_ticks
+            ),
+        )
+        for entry in entries
+    )
+
+
+def collect_process_tree(
+    root_pid: int | None, proc_root: Path | None = None
+) -> tuple[WorkerProcess, ...]:
+    """Return a best-effort process tree rooted at ``root_pid``.
+
+    An explicit ``proc_root`` always reads a `/proc`-style tree. Otherwise
+    Windows uses native process snapshots and POSIX reads `/proc`.
+    """
 
     if root_pid is None:
         return ()
+    if proc_root is None:
+        if _is_windows():
+            return _collect_windows_process_tree(root_pid)
+        proc_root = Path("/proc")
     uptime_seconds = _read_uptime(proc_root)
     processes: dict[int, WorkerProcess] = {}
     children_by_parent: dict[int, list[int]] = {}
@@ -3012,6 +3194,19 @@ def _draw_once(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replace_unencodable_output(stream: Any = None) -> None:
+    """Replace characters that the snapshot output encoding cannot represent.
+
+    Redirected Windows output defaults to a legacy code page, so a status
+    note with characters outside it would otherwise crash `--once`.
+    """
+
+    target = sys.stdout if stream is None else stream
+    reconfigure = getattr(target, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
+
 def _process_root_from_args(args: argparse.Namespace) -> int | None:
     if args.process_root is not None:
         return args.process_root
@@ -3362,6 +3557,20 @@ def _run_location_entry_page(
         stdscr.nodelay(True)
 
 
+def _adopt_terminal_resize(curses_module: Any) -> None:
+    """Make curses adopt a new terminal size after `KEY_RESIZE`.
+
+    ncurses updates its screen size before delivering `KEY_RESIZE`. PDCurses,
+    used by `windows-curses`, keeps the old size until `resize_term(0, 0)`
+    asks it to read the console size again.
+    """
+
+    if _is_windows():
+        resize_term = getattr(curses_module, "resize_term", None)
+        if resize_term is not None:
+            resize_term(0, 0)
+
+
 def _run_curses(args: argparse.Namespace) -> int:
     try:
         import curses
@@ -3464,6 +3673,9 @@ def _run_curses(args: argparse.Namespace) -> int:
                 key = stdscr.getch()
                 if key in (ord("q"), ord("Q"), 27):
                     return
+                if key == curses.KEY_RESIZE:
+                    _adopt_terminal_resize(curses)
+                    break
                 if key in (ord("r"), ord("R")):
                     force_refresh = True
                     break
@@ -3732,6 +3944,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[ubersight] wrote {args.status}")
         return 0
     if args.once:
+        _replace_unencodable_output()
         return _draw_once(args)
     return _run_curses(args)
 

@@ -26,12 +26,17 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
   "Operating System :: POSIX :: Linux",
   "Topic :: Software Development",
   "Topic :: System :: Monitoring",
   "Topic :: Utilities",
 ]
-dependencies = []
+# Standard Windows CPython builds omit `_curses`; `windows-curses` supplies
+# PDCurses until the planned Expletives terminal-library port replaces it.
+dependencies = [
+  "windows-curses>=2.4.2; sys_platform == 'win32'",
+]
 
 [project.urls]
 Repository = "https://github.com/Hard-Problems-Group-LLC/ubersight"

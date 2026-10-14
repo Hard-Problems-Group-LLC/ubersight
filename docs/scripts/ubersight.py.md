@@ -101,7 +101,8 @@ Known operator-location memory lives in a separate ignored local tree:
 .local/operator-location/match-salt
 ```
 
-Runtime background-job status lives outside the checkout by default:
+On POSIX hosts, runtime background-job status lives outside the checkout by
+default:
 
 ```text
 $XDG_RUNTIME_DIR/ubersight/<project-name>/background-jobs
@@ -119,10 +120,19 @@ If no per-user runtime directory is available, scripts fall back to:
 /tmp/ubersight-$UID/<project-name>/background-jobs
 ```
 
+On native Windows, project-scoped runtime state stays under the project's
+ignored `.local/` tree. The default background-job directory is relative to
+the working directory, like the other defaults:
+
+```text
+.local/ubersight/background-jobs
+```
+
 The default project name is the final path component of the current working
-directory. Use `--project-name NAME` to select a different Ubersight runtime
-context. Obsolete pre-Ubersight status files are not part of the current
-protocol.
+directory. On POSIX, `--project-name NAME` selects a different Ubersight
+runtime context. On Windows the project-local directory already identifies
+the project, so `--project-name` changes only the banner. Obsolete
+pre-Ubersight status files are not part of the current protocol.
 
 ## Important Options
 
@@ -315,6 +325,19 @@ the file and may remove it. Completed background-job files are also removed
 after Ubersight observes them, because the footer represents active work
 rather than completed history.
 
+The start-ticks value depends on the platform:
+
+- **Linux:** field 22 of `/proc/<pid>/stat`, counted from boot, so writers
+  also record `boot_id`.
+- **Windows:** the process creation time as a decimal count of
+  100-nanosecond intervals since 1601-01-01 UTC (a `FILETIME`). That value
+  is unique across boots, so Windows ignores `boot_id`. A PowerShell writer
+  can record it with `(Get-Process -Id $PID).StartTime.ToFileTimeUtc()`, and
+  .NET code with `Process.StartTime.ToFileTimeUtc()`.
+
+When Windows refuses to let Ubersight inspect the recorded process, it
+keeps the file rather than risk deleting status for a live job.
+
 The data area uses three footer rows:
 
 - ticker row: a slowly scrolling verbose description of all active jobs;
@@ -455,7 +478,8 @@ tracked prose.
 ## Side Effects and Safety Boundaries
 
 Ubersight reads the status JSON file, local cache files, Git branch state,
-and optionally `/proc` process metadata. In `--write-status` mode, it writes
+and optionally process metadata: `/proc` on Linux, or read-only Win32
+process queries on Windows. In `--write-status` mode, it writes
 only the configured status path. In display mode, it may update origin,
 location, and Tailscale cache files under `.local/ubersight/`, and it may
 append local location observations under `.local/operator-location/`. Local
@@ -515,9 +539,67 @@ Use `--provider nominatim` or `--provider overpass` to narrow a run, `--json`
 for machine-readable output, and `--dry-run` to see generated queries without
 contacting network providers.
 
+## Windows
+
+Ubersight runs natively on Windows 11 in Windows Terminal or the classic
+console host. Windows support is being delivered in roadmap Phase 11. See
+`docs/specifications/windows-platform-support.md` for the current scope.
+
+### Terminal library
+
+The standard Windows CPython build has no `curses`. On Windows, Ubersight
+installs `windows-curses` (PDCurses) automatically as a platform-specific
+dependency. That dependency is temporary until the planned Expletives
+terminal-library port.
+
+### Running it
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\ubersight
+```
+
+To open it as a narrow side pane in the current Windows Terminal window:
+
+```powershell
+wt -w 0 split-pane -V -s 0.3 -d "$PWD" "$PWD\.venv\Scripts\ubersight.exe"
+```
+
+Run it from Windows Terminal or the console host, not mintty, so curses
+gets a real console.
+
+### Where files go
+
+- **Project-scoped runtime state** stays under the project's ignored
+  `.local/` tree.
+- **Cross-project state** belongs under `%LOCALAPPDATA%\ubersight`. Use that
+  root only for material that must be visible across and between projects.
+  Nothing uses it today.
+
+### Process inspection
+
+Ubersight inspects processes through standard-library `ctypes` calls into
+`kernel32`, so the `windows-curses` dependency is the only addition.
+`--process-root` shows executable names rather than full command lines. On
+Windows the run-state column shows `-`.
+
+If that inspection proves fragile, or full command lines become necessary,
+the approved fallback is a Windows-only `psutil` dependency behind the same
+internal interface.
+
+### Not yet ported
+
+- The `ubersight-stop` restart workflow (Slice 13).
+- WiFi, subnet, and gateway probes (Slice 14). Until then the WiFi and
+  location rows report `unknown`.
+- The managed installer (Slice 15).
+
 ## Related Documents
 
 - `project-management/proposals/approved/ubersight-side-window-dashboard.md`
+- `project-management/proposals/approved/windows-platform-support.md`
+- `docs/specifications/windows-platform-support.md`
 - `AGENTS.md`, project-specific Ubersight side-window dashboard guidance
 
 ## Tests
@@ -526,4 +608,5 @@ Relevant tests live in:
 
 ```text
 tests/test_ubersight.py
+tests/test_windows_support.py
 ```

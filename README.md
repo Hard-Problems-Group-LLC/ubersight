@@ -84,3 +84,20 @@ only after the replacement passes its version and `curses` probes.
 
 Installer command diagnostics use `RUN:` as a shell-neutral label. They are
 informational output, not a script to replay in a shell.
+
+## Windows
+
+Ubersight runs natively on Windows 11 from a plain virtual environment
+while the managed installer gains Windows support:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\ubersight
+```
+
+On Windows, `windows-curses` is installed automatically as a
+platform-specific dependency. Background-job status lives under the
+project's ignored `.local/ubersight/background-jobs` directory. See
+`docs/scripts/ubersight.py.md` for the side-pane recipe, process-identity
+rules for job writers, and the features that are not yet ported.

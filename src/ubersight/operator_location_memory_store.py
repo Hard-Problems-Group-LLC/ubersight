@@ -11,12 +11,13 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
-import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+
+from .atomic_files import atomic_write_text
 
 DEFAULT_LOCATION_MEMORY_PATH = Path(".local/operator-location/known-locations.json")
 DEFAULT_LOCATION_OBSERVATIONS_PATH = Path(".local/operator-location/observations.jsonl")
@@ -120,33 +121,23 @@ def load_network_profiles(path: Path) -> list[dict[str, Any]]:
 def write_location_memory(path: Path, records: Sequence[dict[str, Any]]) -> None:
     """Atomically write local-only known-location records."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": LOCATION_MEMORY_SCHEMA,
         "updated_at": local_now().isoformat(timespec="seconds"),
         "locations": list(records),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(tmp_path, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_network_profiles(path: Path, records: Sequence[dict[str, Any]]) -> None:
     """Atomically write local-only network trait profiles."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": NETWORK_PROFILES_SCHEMA,
         "updated_at": local_now().isoformat(timespec="seconds"),
         "networks": list(records),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(tmp_path, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def load_location_memory_salt(path: Path, *, create: bool = False) -> str:
