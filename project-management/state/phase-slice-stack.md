@@ -19,7 +19,7 @@ untracked.
 Recent phases:
 
 * Phase 10: Execution-layer failure forensics, done.
-* Phase 11: Native Windows support, in progress (Slices 11-12 done).
+* Phase 11: Native Windows support, in progress (Slices 11-13 and 15 done).
 
 Active phase:
 
@@ -47,15 +47,16 @@ Paused Phase 11 slices:
 
 ## Current Work
 
-Phase 12 runs on `feature/ubersight-autosplit`, branched from
-`feature/windows-platform-support` after Slices 11 and 12 were pushed. The
+Phase 12 runs on `feature/ubersight-autosplit`, which merges
+`feature/windows-platform-support` as Phase 11 slices land. The
 specification is `docs/specifications/ubersight-autosplit.md`, and the
-approved proposal records the operator's decisions:
-- support Windows Terminal, tmux, GNU screen, WezTerm, kitty, and
-  Terminator;
-- account for SSH and mosh sessions; and
-- keep the invoking shell top-left.
+approved proposal records the operator's decisions.
 
-All six backends are implemented with unit-tested plans. Windows Terminal
-is verified on the workstation; the Linux backends await live operator
-verification. Phase 11 resumes with Slice 13 afterward.
+Status:
+- All six autosplit backends are implemented with unit-tested plans.
+- Windows Terminal was verified live by the operator.
+- The dashboard pane runs under `ubersight --supervise`, so
+  `ubersight-stop` restarts it in place.
+- The Linux backends still await live operator verification.
+- Phase 11 has Slices 14 (network probes) and 16 (Windows test parity)
+  remaining.
