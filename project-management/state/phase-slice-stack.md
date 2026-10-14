@@ -53,7 +53,6 @@ Done:
 - Slice 14: Windows network probes, `Ethernet (<LAN name>)`, and the
   redesigned location editor.
 - Slice 15: `install.ps1` and the Windows stage two.
-
 - Slice 16: Windows test parity; the remaining skips are permanent
   POSIX-only cases with explicit reasons.
 
