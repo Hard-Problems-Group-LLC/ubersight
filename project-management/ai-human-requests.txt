@@ -10,6 +10,17 @@ owner/requestor, and ISO 8601 timestamps.
 Pending Requests
 ----------------
 
+* 2026-10-13T23:59:58-07:00 - Verify `ubersight-autosplit` live on Linux,
+  which the Windows workstation cannot exercise:
+  - check tmux, GNU screen, WezTerm, kitty (with `allow_remote_control`),
+    and Terminator 2.1.2 or newer;
+  - repeat the tmux and screen checks over SSH and over mosh;
+  - confirm that a plain SSH or mosh shell without a multiplexer is refused
+    with a clear message.
+  Use `--dry-run` first to see each plan. Specification:
+  `docs/specifications/ubersight-autosplit.md`. Requestor: Claude.
+  Owner: operator.
+
 * 2026-10-13T23:03:19-07:00 - Phase 11 Windows support needs three operator
   checks that this session cannot perform. First, run the live dashboard in
   a Windows Terminal side pane

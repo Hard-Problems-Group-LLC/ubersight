@@ -18,12 +18,12 @@ untracked.
 
 Recent phases:
 
-* Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
+* Phase 11: Native Windows support, in progress (Slices 11-12 done).
 
 Active phase:
 
-* Phase 11: Native Windows support, active.
+* Phase 12: Terminal workspace autosplit, active.
 
 Upcoming phases:
 
@@ -34,8 +34,12 @@ Upcoming phases:
 
 Active phase slices:
 
-* Slice 11: Fix Windows runtime blockers, active.
-* Slice 12: Add Windows process identity, planned.
+* Slice 17: Add autosplit core, WT, and tmux, active.
+* Slice 18: Add autosplit GNU screen backend, implemented; awaiting Linux verification.
+* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting Linux verification.
+
+Paused Phase 11 slices:
+
 * Slice 13: Port stop and restart workflow, planned.
 * Slice 14: Add Windows network probes, planned.
 * Slice 15: Add Windows install path, planned.
@@ -43,11 +47,15 @@ Active phase slices:
 
 ## Current Work
 
-Phase 11 runs on `feature/windows-platform-support`. The specification is
-`docs/specifications/windows-platform-support.md`, and the approved proposal
-records operator decisions: `windows-curses` temporarily, standard-library
-`ctypes` process inspection with a documented `psutil` fallback, plain-venv
-first, and project-local `.local/` runtime state on Windows. Slices 11 and
-12 land together because the POSIX-only liveness check would delete live
-Windows background-job files. The Expletives terminal-library port and the
-FieldManual migration stay out of this branch.
+Phase 12 runs on `feature/ubersight-autosplit`, branched from
+`feature/windows-platform-support` after Slices 11 and 12 were pushed. The
+specification is `docs/specifications/ubersight-autosplit.md`, and the
+approved proposal records the operator's decisions:
+- support Windows Terminal, tmux, GNU screen, WezTerm, kitty, and
+  Terminator;
+- account for SSH and mosh sessions; and
+- keep the invoking shell top-left.
+
+All six backends are implemented with unit-tested plans. Windows Terminal
+is verified on the workstation; the Linux backends await live operator
+verification. Phase 11 resumes with Slice 13 afterward.
