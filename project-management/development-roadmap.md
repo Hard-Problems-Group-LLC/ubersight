@@ -21,7 +21,7 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Phase 8: Dashboard usability refinement, planned.
 * Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
-* Phase 11: Native Windows support, in progress.
+* Phase 11: Native Windows support, done.
 * Phase 12: Terminal workspace autosplit, active.
 
 ## Slices
@@ -41,7 +41,7 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
-* Slice 16: Reach Windows test parity, planned.
+* Slice 16: Reach Windows test parity, done.
 * Slice 17: Add autosplit core, WT, and tmux, active.
 * Slice 18: Add autosplit GNU screen backend, implemented; awaiting Linux verification.
 * Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting Linux verification.
