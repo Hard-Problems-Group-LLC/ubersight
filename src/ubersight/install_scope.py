@@ -57,6 +57,21 @@ def is_repo_local_codex_home(user_home: Path, repo_root: Path) -> bool:
     return user_home.expanduser().resolve() == repo_local_codex_home(repo_root)
 
 
+def is_repo_isolated_home(user_home: Path, repo_root: Path) -> bool:
+    """Return True when one home lies inside the repository checkout.
+
+    AI agent wrappers isolate their sessions by pointing the home directory
+    into the checkout: `.codex-home` for Codex, and `.local/claude/HOME`
+    for Claude Code, which on Windows also redirects `USERPROFILE`. No real
+    user home lives inside a project checkout, so any such home is treated
+    as isolated.
+    """
+
+    home = user_home.expanduser().resolve()
+    root = repo_root.expanduser().resolve()
+    return home == root or root in home.parents
+
+
 def describe_user_home_source(
     repo_root: Path,
     user_home: Path,
@@ -68,6 +83,8 @@ def describe_user_home_source(
         return "explicit --user-home target"
     if is_repo_local_codex_home(user_home, repo_root):
         return "current repo-local Codex home"
+    if is_repo_isolated_home(user_home, repo_root):
+        return "current repo-local isolated AI home"
     return "current process HOME"
 
 
@@ -83,9 +100,10 @@ def resolve_user_home(
         return explicit_home.expanduser().resolve()
 
     user_home = current_home()
-    if is_repo_local_codex_home(user_home, repo_root) and not allow_isolated_home:
+    if is_repo_isolated_home(user_home, repo_root) and not allow_isolated_home:
         raise RuntimeError(
-            "Current HOME resolves to the repo-local Codex home ({}). Rerun "
+            "Current HOME resolves inside this checkout ({}), which is an "
+            "isolated AI agent home such as the repo-local Codex home. Rerun "
             "from a normal terminal, pass --user-home PATH to target a "
             "different user scope explicitly, or pass --allow-isolated-home "
             "to install into the isolated AI home on purpose.".format(user_home)
@@ -101,6 +119,7 @@ __all__ = [
     "default_user_bin_dir",
     "default_user_share_dir",
     "describe_user_home_source",
+    "is_repo_isolated_home",
     "is_repo_local_codex_home",
     "repo_local_codex_home",
     "resolve_user_home",

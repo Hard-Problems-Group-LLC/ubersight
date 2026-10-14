@@ -19,6 +19,10 @@ Pending Requests
   available on the Windows workstation. Third, decide whether to install
   managed Python 3.14.6 on Windows now or keep the 3.12 venv until Slice 15.
   Requestor: Claude. Owner: operator.
+  2026-10-14T00:24:00-07:00 - Third item decided: Windows installs use the
+  pinned Python when the `py` launcher has it, or the newest Python 3
+  otherwise. The live side pane was confirmed working through the
+  autosplit verification. The Linux test run remains open.
 
 Active Requests
 ---------------

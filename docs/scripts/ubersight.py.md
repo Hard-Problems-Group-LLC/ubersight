@@ -554,19 +554,18 @@ terminal-library port.
 
 ### Running it
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev]"
-.\.venv\Scripts\ubersight
-```
+Install it once from the checkout with `.\install.ps1`. That puts
+`ubersight.exe` and the other commands in `~\.local\bin` and adds that
+directory to your user PATH if needed. After that, run `ubersight` from
+any project directory.
 
-Keep the leading `.\`. Without it, PowerShell reads
+Keep the leading `.\` on relative paths. Without it, PowerShell reads
 `.venv\Scripts\ubersight` as a command inside a module named `.venv`.
 
 To open it as a narrow side pane in the current Windows Terminal window:
 
 ```powershell
-wt -w 0 split-pane -V -s 0.3 -d "$PWD" "$PWD\.venv\Scripts\ubersight.exe"
+wt -w 0 split-pane -V -s 0.3 -d "$PWD" ubersight
 ```
 
 Run it from Windows Terminal or the console host, not mintty, so curses
@@ -596,7 +595,7 @@ internal interface.
 - The `ubersight-stop` restart workflow (Slice 13).
 - WiFi, subnet, and gateway probes (Slice 14). Until then the WiFi and
   location rows report `unknown`.
-- The managed installer (Slice 15).
+- `ubersight-stop` itself still fails on Windows until Slice 13.
 
 ## Related Documents
 

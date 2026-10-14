@@ -39,5 +39,5 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 12: Add Windows process identity, planned.
 * Slice 13: Port stop and restart workflow, planned.
 * Slice 14: Add Windows network probes, planned.
-* Slice 15: Add Windows install path, planned.
+* Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.

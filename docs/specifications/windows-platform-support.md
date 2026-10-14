@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: In progress (Slices 11 and 12)  
+Status: In progress (Slices 11, 12, and 15 implemented)  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -117,18 +117,83 @@ If `ctypes` inspection proves fragile or too limited, for example when
 full command lines are needed, the approved fallback is to add
 `psutil; sys_platform == "win32"` behind the same internal interface.
 
+## Slice 15: Install Path
+
+### Stage one
+
+`install.ps1` is the Windows counterpart of `install.sh`. It runs in
+Windows PowerShell 5.1 and PowerShell 7, and passes every argument to
+`scripts/install-stage-2.py`. It picks the interpreter in this order:
+
+1. `THEKNOWLEDGE_BOOTSTRAP_PYTHON`;
+2. the pinned runtime via the `py` launcher;
+3. the newest Python 3 via the `py` launcher;
+4. `python` or `python3` on `PATH`, never the Microsoft Store aliases.
+
+The selected interpreter must run and report Python 3.9 or newer.
+
+### Stage two on Windows
+
+- **Standard mode** (the default) builds `~\.local\share\ubersight\venv`
+  from the selected interpreter and installs the checkout
+  non-editable.
+- **Development and venv-only modes** build the checkout's `.venv` from
+  the selected interpreter, which must meet the runtime floor. A version
+  other than the pinned one is reported. pyenv, direnv, and shell-init
+  setup are skipped, with a printed note.
+- `--system` is rejected on Windows.
+- Managed Git hook wrappers are converted to LF after installation, because
+  the shared hook installer writes CRLF on Windows and bash rejects it.
+  ECR: `ECRs/TheKnowledge/open/git-hook-wrapper-crlf-on-windows.md`.
+
+### Launchers
+
+- Launchers are copies of pip's `.exe` launchers in `~\.local\bin`.
+  Symlinks would need Developer Mode or elevation.
+- A copy runs its own environment because pip embeds the environment's
+  absolute Python path. That embedded path also identifies ownership.
+- An existing file is replaced only when it is one of these:
+  - a launcher for this environment;
+  - a Python console-script launcher from another install mode;
+  - an older symlink into this environment.
+
+  Any other file is refused.
+- A running launcher cannot be overwritten, so it is renamed aside. Renamed
+  copies are deleted once they exit, at the latest on the next install.
+- Venv-only mode removes only launchers that belong to the checkout's
+  `.venv`.
+
+### PATH
+
+- When the launcher directory is missing from the user PATH
+  (`HKCU\Environment\Path`), it is appended. The value keeps its registry
+  type, and a `WM_SETTINGCHANGE` broadcast lets new terminals see it.
+- `--no-modify-path` prints instructions instead.
+- A directory inside the checkout is never added, so an isolated agent
+  home cannot leak into the real environment.
+- POSIX hosts only report a missing launcher directory.
+
+### Isolated homes
+
+Any user home inside the checkout counts as an isolated agent home. That
+covers Codex's `.codex-home` and Claude Code's `.local/claude/HOME`, which
+also redirects `USERPROFILE`, `APPDATA`, and `LOCALAPPDATA` on Windows. The
+installer refuses such a home unless `--user-home` or
+`--allow-isolated-home` is given.
+
 ## Later Slices
 
 These slices get their own requirements when they start:
 
 - 13: stop and restart workflow
 - 14: network and location probes
-- 15: install path
 - 16: test-suite parity
 
-Until Slices 15 and 16 land, 17 installer tests are marked
-`POSIX_INSTALLER_ONLY` and skipped on Windows with an explicit reason. They
-still run on POSIX hosts. Slice 16 must remove those skips.
+Until Slice 16 lands, 15 installer tests in `tests/test_bootstrap.py`
+are marked `POSIX_INSTALLER_ONLY` and skipped on Windows with an
+explicit reason. They still run on POSIX hosts. Slice 16 must remove
+those skips. Slice 15 already removed the two `tests/test_install_scope.py`
+skips.
 
 ## Follow-Ups Outside This Repository
 
