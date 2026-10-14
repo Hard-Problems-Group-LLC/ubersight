@@ -337,6 +337,42 @@ def test_run_command_sets_ssh_command_only_for_fetch(monkeypatch) -> None:
     assert captured[1][1]["GIT_TERMINAL_PROMPT"] == "0"
 
 
+def test_run_command_never_takes_optional_git_locks(monkeypatch) -> None:
+    """Polling `git status` must not hold `.git/index.lock` against the operator."""
+
+    captured: list[dict[str, str]] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(kwargs["env"])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(ubersight.subprocess, "run", fake_run)
+    monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
+    ubersight._run_command(("git", "status", "--porcelain=v1"))
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    ubersight._run_command(("git", "status", "--porcelain=v1"))
+
+    assert captured[0]["GIT_OPTIONAL_LOCKS"] == "0"
+    assert captured[1]["GIT_OPTIONAL_LOCKS"] == "1"
+
+
+def test_git_status_probe_leaves_no_index_lock(tmp_path: Path) -> None:
+    """A real status probe succeeds and leaves another command's lock alone."""
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    lock = tmp_path / ".git" / "index.lock"
+    lock.write_text("held by another git command\n", encoding="utf-8")
+
+    result = ubersight._run_command(
+        ("git", "status", "--porcelain=v2", "--branch"), cwd=tmp_path
+    )
+
+    assert result.returncode == 0
+    assert lock.read_text(encoding="utf-8") == "held by another git command\n"
+
+
 # Process identity ----------------------------------------------------------
 
 

@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -38,6 +39,12 @@ DEFAULT_STATUS_PATH = Path(".local/ubersight/status.json")
 # `%LOCALAPPDATA%\ubersight` on Windows; nothing needs that today.
 WINDOWS_PROJECT_RUNTIME_ROOT = Path(".local/ubersight")
 GIT_SSH_BATCH_OPTIONS = "-o BatchMode=yes -o ConnectTimeout=5"
+# Exit statuses shared by the dashboard, `ubersight --supervise`, and
+# `ubersight-stop`. 75 is EX_TEMPFAIL: the dashboard should start again.
+RESTART_EXIT_CODE = 75
+KEYBOARD_INTERRUPT_EXIT_CODE = 130
+WINDOWS_CONTROL_C_EXIT = 0xC000013A
+SUPERVISOR_CRASH_DELAY_SECONDS = 1.0
 DEFAULT_ORIGIN_CACHE_PATH = Path(".local/ubersight/origin-cache.json")
 DEFAULT_LOCATION_CACHE_PATH = Path(".local/ubersight/location-cache.json")
 DEFAULT_TAILSCALE_CACHE_PATH = Path(".local/ubersight/tailscale-cache.json")
@@ -323,6 +330,10 @@ def _run_command(
 
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    # Read-only probes such as `git status` otherwise take `.git/index.lock`
+    # to refresh cached file stats. Polling every second, that makes the
+    # operator's own `git add` or commit fail at random with a lock error.
+    env.setdefault("GIT_OPTIONAL_LOCKS", "0")
     # Only fetches reach a remote, so only they pay for the extra
     # `git config` lookup that preserves a configured SSH client.
     if tuple(args[:2]) == ("git", "fetch"):
@@ -3571,11 +3582,116 @@ def _adopt_terminal_resize(curses_module: Any) -> None:
             resize_term(0, 0)
 
 
+class RestartSignal:
+    """Restart requests delivered to a live dashboard by `ubersight-stop`.
+
+    Windows uses a named event in the logon session. POSIX catches `SIGTERM`,
+    so a request leaves curses through its normal cleanup instead of killing
+    the process with the terminal still in curses mode.
+    """
+
+    def __init__(self) -> None:
+        self._requested = False
+        self._event: windows_processes.RestartEvent | None = None
+        self._previous_handler: Any = None
+        self._installed_handler = False
+
+    def install(self) -> None:
+        """Start accepting restart requests for this process."""
+
+        if _is_windows():
+            self._event = windows_processes.RestartEvent.create()
+            return
+        self._previous_handler = signal.signal(signal.SIGTERM, self._on_sigterm)
+        self._installed_handler = True
+
+    def _on_sigterm(self, signum: int, frame: Any) -> None:
+        """Record a POSIX restart request without interrupting curses."""
+
+        self._requested = True
+
+    def requested(self) -> bool:
+        """Return whether a restart has been requested."""
+
+        if self._requested:
+            return True
+        if self._event is not None and self._event.is_set():
+            self._requested = True
+        return self._requested
+
+    def close(self) -> None:
+        """Stop accepting restart requests and restore the previous state."""
+
+        if self._event is not None:
+            self._event.close()
+            self._event = None
+        if self._installed_handler:
+            signal.signal(signal.SIGTERM, self._previous_handler)
+            self._installed_handler = False
+
+
+def _supervisor_log(message: str) -> None:
+    """Print one supervisor notice to standard error."""
+
+    print(f"[ubersight-supervise] {message}", file=sys.stderr, flush=True)
+
+
+def run_supervised(
+    child_args: Sequence[str],
+    *,
+    run: Any = subprocess.run,
+    sleep: Any = time.sleep,
+    log: Any = _supervisor_log,
+) -> int:
+    """Keep the dashboard running in this terminal until the operator quits.
+
+    The child shares the terminal. A restart request (status 75) restarts it
+    at once; Q (status 0) and Ctrl+C end supervision; any other exit, such
+    as a crash while code is being edited, restarts after a short delay.
+    """
+
+    command = [sys.executable, "-m", "ubersight", *child_args]
+    interrupted = {KEYBOARD_INTERRUPT_EXIT_CODE, WINDOWS_CONTROL_C_EXIT}
+    if hasattr(signal, "SIGINT"):
+        interrupted.add(-signal.SIGINT)
+    while True:
+        try:
+            completed = run(command, check=False)
+        except KeyboardInterrupt:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+        status = completed.returncode
+        if status == 0:
+            return 0
+        if status in interrupted:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+        if status == RESTART_EXIT_CODE:
+            log("restart requested; restarting Ubersight.")
+            continue
+        log(
+            f"Ubersight exited with status {status}; restarting in "
+            f"{SUPERVISOR_CRASH_DELAY_SECONDS:g}s. Press Ctrl+C to stop."
+        )
+        try:
+            sleep(SUPERVISOR_CRASH_DELAY_SECONDS)
+        except KeyboardInterrupt:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+
+
 def _run_curses(args: argparse.Namespace) -> int:
+    """Run the live dashboard and return its exit status.
+
+    Returns 0 when the operator quits, `RESTART_EXIT_CODE` when
+    `ubersight-stop` requests a restart, and `KEYBOARD_INTERRUPT_EXIT_CODE`
+    after Ctrl+C.
+    """
+
     try:
         import curses
     except ImportError as exc:
         raise SystemExit(f"curses is unavailable: {exc}") from exc
+
+    restart = RestartSignal()
+    outcome = {"status": 0}
 
     def loop(stdscr: Any) -> None:
         curses.curs_set(0)
@@ -3605,6 +3721,9 @@ def _run_curses(args: argparse.Namespace) -> int:
         refresh_seconds = max(0.1, args.refresh_ms / 1000.0)
         force_refresh = False
         while True:
+            if restart.requested():
+                outcome["status"] = RESTART_EXIT_CODE
+                return
             height, width = stdscr.getmaxyx()
             status = load_status(Path(args.status))
             workers = collect_process_tree(_process_root_from_args(args))
@@ -3670,6 +3789,9 @@ def _run_curses(args: argparse.Namespace) -> int:
             stdscr.refresh()
             deadline = time.monotonic() + refresh_seconds
             while time.monotonic() < deadline:
+                if restart.requested():
+                    outcome["status"] = RESTART_EXIT_CODE
+                    return
                 key = stdscr.getch()
                 if key in (ord("q"), ord("Q"), 27):
                     return
@@ -3690,8 +3812,15 @@ def _run_curses(args: argparse.Namespace) -> int:
                     break
                 time.sleep(0.05)
 
-    curses.wrapper(loop)
-    return 0
+    restart.install()
+    try:
+        curses.wrapper(loop)
+    except KeyboardInterrupt:
+        # curses.wrapper has already restored the terminal; exit quietly.
+        return KEYBOARD_INTERRUPT_EXIT_CODE
+    finally:
+        restart.close()
+    return outcome["status"]
 
 
 def _status_from_args(args: argparse.Namespace) -> UbersightStatus:
@@ -3889,6 +4018,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stale-seconds", type=int, default=900, help="age threshold for stale status"
     )
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help=(
+            "keep the dashboard running: restart it after ubersight-stop "
+            "requests and crashes; Q or Ctrl+C ends supervision"
+        ),
+    )
 
     writer = parser.add_argument_group("status writer")
     writer.add_argument(
@@ -3930,9 +4067,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run Ubersight or write one status snapshot."""
 
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_args)
     if args.codex_pid is not None and args.process_root is not None:
         parser.error("--codex-pid and --process-root are aliases; provide only one")
+    if args.supervise:
+        if args.once or args.write_status:
+            parser.error("--supervise cannot be combined with --once or --write-status")
+        return run_supervised([arg for arg in raw_args if arg != "--supervise"])
     if args.background_job_dir is None:
         args.background_job_dir = str(background_job_dir(args.project_name))
     if args.write_status:

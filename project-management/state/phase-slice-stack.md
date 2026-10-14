@@ -40,7 +40,7 @@ Active phase slices:
 
 Paused Phase 11 slices:
 
-* Slice 13: Port stop and restart workflow, planned.
+* Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, planned.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.

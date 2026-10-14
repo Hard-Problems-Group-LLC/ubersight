@@ -36,6 +36,12 @@ STILL_ACTIVE = 259
 ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
 MAX_PATH = 260
+EVENT_MODIFY_STATE = 0x00000002
+PROCESS_TERMINATE = 0x00000001
+# Named objects under `Local\` are shared by every process in the logon
+# session, including sandboxed agent sessions with redirected profiles.
+RESTART_EVENT_PREFIX = "Local\\ubersight-dashboard-restart-"
+FORCED_EXIT_CODE = 1
 
 # FILETIME counts 100 ns intervals from 1601-01-01 UTC; the Unix epoch is
 # this many seconds later.
@@ -147,6 +153,19 @@ def _kernel32() -> Any:
     kernel32.Process32FirstW.restype = boolean
     kernel32.Process32NextW.argtypes = [handle, ctypes.POINTER(_ProcessEntry32W)]
     kernel32.Process32NextW.restype = boolean
+    kernel32.CreateEventW.argtypes = [
+        ctypes.c_void_p,
+        boolean,
+        boolean,
+        ctypes.c_wchar_p,
+    ]
+    kernel32.CreateEventW.restype = handle
+    kernel32.OpenEventW.argtypes = [dword, boolean, ctypes.c_wchar_p]
+    kernel32.OpenEventW.restype = handle
+    kernel32.SetEvent.argtypes = [handle]
+    kernel32.SetEvent.restype = boolean
+    kernel32.TerminateProcess.argtypes = [handle, ctypes.c_uint32]
+    kernel32.TerminateProcess.restype = boolean
     _KERNEL32 = kernel32
     return kernel32
 
@@ -237,6 +256,118 @@ def process_creation_filetime(pid: int) -> int | None:
     if probe.state != PROCESS_RUNNING:
         return None
     return probe.creation_filetime
+
+
+def restart_event_name(pid: int) -> str:
+    """Return the named restart event a dashboard with `pid` creates."""
+
+    return f"{RESTART_EVENT_PREFIX}{pid}"
+
+
+class RestartEvent:
+    """A live dashboard's named restart event.
+
+    The dashboard keeps the handle open for its whole life. Windows destroys
+    a named event when its last handle closes, so the event exists exactly
+    while the dashboard runs. `ubersight-stop` sets the event to request a
+    clean restart.
+    """
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+
+    @classmethod
+    def create(cls, pid: int | None = None) -> RestartEvent | None:
+        """Create this process's restart event, or return None if impossible."""
+
+        if not is_supported():
+            return None
+        try:
+            kernel32 = _kernel32()
+        except (AttributeError, OSError):
+            return None
+        name = restart_event_name(os.getpid() if pid is None else pid)
+        handle = kernel32.CreateEventW(None, True, False, name)
+        if not handle:
+            return None
+        return cls(handle)
+
+    def is_set(self) -> bool:
+        """Return whether a restart has been requested."""
+
+        if not self._handle:
+            return False
+        return _kernel32().WaitForSingleObject(self._handle, 0) == WAIT_OBJECT_0
+
+    def close(self) -> None:
+        """Release the event handle, which removes the event from the session."""
+
+        if self._handle:
+            _kernel32().CloseHandle(self._handle)
+            self._handle = None
+
+
+def _open_restart_event(pid: int) -> Any:
+    """Open a dashboard's restart event for signaling, or return None."""
+
+    if pid <= 0 or not is_supported():
+        return None
+    try:
+        kernel32 = _kernel32()
+    except (AttributeError, OSError):
+        return None
+    handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, restart_event_name(pid))
+    return handle or None
+
+
+def has_restart_event(pid: int) -> bool:
+    """Return whether process `pid` is a dashboard with a restart event."""
+
+    handle = _open_restart_event(pid)
+    if handle is None:
+        return False
+    _kernel32().CloseHandle(handle)
+    return True
+
+
+def signal_restart_event(pid: int) -> bool:
+    """Request a restart from dashboard `pid`; return whether one was found."""
+
+    handle = _open_restart_event(pid)
+    if handle is None:
+        return False
+    kernel32 = _kernel32()
+    try:
+        return bool(kernel32.SetEvent(handle))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def terminate_process(pid: int, expected_creation_filetime: int | None) -> bool:
+    """Forcibly end `pid` only while it is still the expected process.
+
+    The creation time is checked through the same handle used to terminate,
+    so a PID that Windows has reused for another process is never ended.
+    """
+
+    if pid <= 0 or not is_supported():
+        return False
+    try:
+        kernel32 = _kernel32()
+    except (AttributeError, OSError):
+        return False
+    handle = kernel32.OpenProcess(
+        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    if not handle:
+        return False
+    try:
+        if expected_creation_filetime is not None:
+            if _creation_filetime(kernel32, handle) != expected_creation_filetime:
+                return False
+        return bool(kernel32.TerminateProcess(handle, FORCED_EXIT_CODE))
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def current_filetime(now_seconds: float | None = None) -> int:

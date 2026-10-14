@@ -38,7 +38,7 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 10: Harden command logs and recovery guidance, done.
 * Slice 11: Fix Windows runtime blockers, done.
 * Slice 12: Add Windows process identity, done.
-* Slice 13: Port stop and restart workflow, planned.
+* Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, planned.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.

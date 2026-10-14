@@ -171,6 +171,9 @@ pre-Ubersight status files are not part of the current protocol.
 - `--width N --height N`: geometry for `--once` snapshots. Defaults to 40x40.
 - `--stale-seconds N`: mark status stale after this age.
 - `--write-status`: write status JSON and exit.
+- `--supervise`: keep the dashboard running. It restarts after
+  `ubersight-stop` requests and after crashes; Q or Ctrl+C ends
+  supervision.
 
 Phase rows passed to `--phase-row` use:
 
@@ -382,7 +385,9 @@ operation blocks. By default, refresh runs `git fetch --quiet origin` before
 comparing the current branch with its upstream. Git subprocesses disable
 terminal prompts and use SSH batch mode with a short connect timeout, so a
 hostile or captive network should degrade to `WORK: CHECK GIT` instead of
-blocking the side-window display.
+blocking the side-window display. They also run with `GIT_OPTIONAL_LOCKS=0`,
+so the dashboard's frequent `git status` checks never hold `.git/index.lock`
+while the operator or an agent stages or commits.
 
 Location status separates cheap local network observation from public
 geolocation. By default, local hostname, username, WiFi SSID, and related
@@ -501,18 +506,51 @@ Its tracked documentation is in
 
 ## Restarting the Side Pane
 
-When the wrapper is running, agents should restart visible Ubersight after
-visual rendering changes by running:
+Run the side pane under the supervisor, on any platform:
+
+```bash
+ubersight --supervise
+```
+
+`ubersight-autosplit` starts its dashboard pane this way. The supervisor
+handles each exit differently:
+
+- After a restart request, it restarts the dashboard immediately.
+- After a crash, for example while code is being edited, it restarts the
+  dashboard after one second.
+- When you press Q or Ctrl+C, it exits.
+
+After visual rendering changes, or after reinstalling Ubersight, agents
+restart every visible dashboard by running:
 
 ```bash
 ubersight-stop
 ```
 
-The compatibility helper `scripts/stop_ubersight.py` runs the same command
-from a source checkout. The helper finds same-user `ubersight.py` processes,
-sends `SIGTERM`, and lets `scripts/ubersight_wrapper.sh` restart Ubersight.
 It exists so the operator can preauthorize one stable command rather than
-approving ad hoc `kill` or `pkill` process IDs.
+approving ad hoc `kill` or `pkill` process IDs. The compatibility helper
+`scripts/stop_ubersight.py` runs the same command from a source checkout.
+
+How it works:
+
+- **Restart requests:** the helper asks every same-user dashboard to
+  restart. Each dashboard leaves curses cleanly and exits with status 75,
+  and its supervisor starts it again with the new code. An unsupervised
+  dashboard just exits.
+- **Finding dashboards on Windows:** each dashboard exposes a named
+  restart event in the logon session. The helper therefore reaches the
+  operator's dashboards even from a sandboxed agent session.
+- **Finding dashboards on POSIX:** the helper finds dashboard processes
+  in `/proc` and sends `SIGTERM`, which the dashboard treats as a restart
+  request. Supervisor processes are never matched.
+- **Waiting and exit status:** the helper waits up to `--wait-seconds`
+  (default 5). It exits with status 1 if any dashboard is still running.
+  `--force` then ends those dashboards, checking each process's identity
+  first so that a reused process ID is never killed. `--dry-run` lists the
+  matches.
+
+The older `scripts/ubersight_wrapper.sh` still works on POSIX. It restarts
+after any exit, including Q.
 
 ## Provider Diagnostics
 
@@ -592,10 +630,8 @@ internal interface.
 
 ### Not yet ported
 
-- The `ubersight-stop` restart workflow (Slice 13).
 - WiFi, subnet, and gateway probes (Slice 14). Until then the WiFi and
   location rows report `unknown`.
-- `ubersight-stop` itself still fails on Windows until Slice 13.
 
 ## Related Documents
 
