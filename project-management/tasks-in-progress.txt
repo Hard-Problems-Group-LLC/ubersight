@@ -3,3 +3,9 @@ Tasks in Progress
 Track tasks that are actively being implemented. Keep this file small and
 current. Use the same asterisk-plus-blank-line format as the backlog, with
 status notes, blockers, and ISO 8601 timestamps.
+
+* 2026-10-13T22:58:00-07:00 - Native Windows support (roadmap Phase 11),
+  Slices 11 and 12: fix Windows runtime blockers and add Windows process
+  identity. Branch `feature/windows-platform-support`. Specification:
+  `docs/specifications/windows-platform-support.md`. Owner: Claude and
+  operator. Requestor: operator. No active blocker.

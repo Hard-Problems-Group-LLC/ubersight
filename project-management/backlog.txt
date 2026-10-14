@@ -8,3 +8,17 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   roles, scope, trigger criteria, decision records, reviewer independence,
   and its interaction with proposals and ACP. Owner: operator and Codex.
   Requestor: operator. No active blocker.
+
+* 2026-10-13T22:58:00-07:00 - Finish native Windows support (roadmap Phase
+  11) after Slices 11 and 12: Slice 13 stop and restart workflow, Slice 14
+  Windows network and location probes, Slice 15 Windows install path, and
+  Slice 16 Windows test-suite parity. Specification:
+  `docs/specifications/windows-platform-support.md`. Owner: Claude and
+  operator. Requestor: operator. No active blocker.
+  Slice 16 must remove the temporary `POSIX_INSTALLER_ONLY` Windows skips
+  in `tests/test_bootstrap.py` and `tests/test_install_scope.py`.
+
+* 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
+  temporary `windows-curses` dependency to the Expletives library on its own
+  feature branch, separate from Windows compatibility work. Owner: operator.
+  Requestor: operator. Depends on Phase 11 landing first.

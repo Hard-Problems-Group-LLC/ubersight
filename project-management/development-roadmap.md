@@ -21,6 +21,7 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Phase 8: Dashboard usability refinement, planned.
 * Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
+* Phase 11: Native Windows support, active.
 
 ## Slices
 
@@ -34,3 +35,9 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 8: Polish install and update workflow, done.
 * Slice 9: Investigate executable truncation, done.
 * Slice 10: Harden command logs and recovery guidance, done.
+* Slice 11: Fix Windows runtime blockers, active.
+* Slice 12: Add Windows process identity, planned.
+* Slice 13: Port stop and restart workflow, planned.
+* Slice 14: Add Windows network probes, planned.
+* Slice 15: Add Windows install path, planned.
+* Slice 16: Reach Windows test parity, planned.

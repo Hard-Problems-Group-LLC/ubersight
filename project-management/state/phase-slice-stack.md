@@ -18,21 +18,12 @@ untracked.
 
 Recent phases:
 
-* Phase 1: Standalone package foundation, done.
-* Phase 2: Side-window dashboard runtime, done.
-* Phase 3: Operator context safety panels, done.
-* Phase 4: Roadmap-backed status workflow, done.
 * Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
 
-Recent and active slices:
+Active phase:
 
-* Slice 1: Establish package layout and launchers, done.
-* Slice 2: Restore managed quality-gate files, done.
-* Slice 3: Add roadmap-backed status convention, done.
-* Slice 8: Polish install and update workflow, done.
-* Slice 9: Investigate executable truncation, done.
-* Slice 10: Harden command logs and recovery guidance, done.
+* Phase 11: Native Windows support, active.
 
 Upcoming phases:
 
@@ -41,16 +32,22 @@ Upcoming phases:
 * Phase 7: Status-schema hardening and validation, planned.
 * Phase 8: Dashboard usability refinement, planned.
 
-Upcoming slices:
+Active phase slices:
 
-* Slice 4: Add roadmap parsing helper, planned.
-* Slice 5: Document consuming-project onboarding, planned.
-* Slice 6: Harden status-writer validation, planned.
-* Slice 7: Broaden dashboard smoke coverage, planned.
+* Slice 11: Fix Windows runtime blockers, active.
+* Slice 12: Add Windows process identity, planned.
+* Slice 13: Port stop and restart workflow, planned.
+* Slice 14: Add Windows network probes, planned.
+* Slice 15: Add Windows install path, planned.
+* Slice 16: Reach Windows test parity, planned.
 
 ## Current Work
 
-Guarded shared-pyenv corruption recovery repaired the live Python 3.14.6
-runtime and passed the uncached full quality gate. Phase 10 forensics traced
-the damage to replayed installer output whose `->` marker became Bash output
-redirection. Slice 10 replaced that marker locally and filed upstream guidance.
+Phase 11 runs on `feature/windows-platform-support`. The specification is
+`docs/specifications/windows-platform-support.md`, and the approved proposal
+records operator decisions: `windows-curses` temporarily, standard-library
+`ctypes` process inspection with a documented `psutil` fallback, plain-venv
+first, and project-local `.local/` runtime state on Windows. Slices 11 and
+12 land together because the POSIX-only liveness check would delete live
+Windows background-job files. The Expletives terminal-library port and the
+FieldManual migration stay out of this branch.
