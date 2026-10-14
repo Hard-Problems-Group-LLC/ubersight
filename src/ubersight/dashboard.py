@@ -3252,6 +3252,53 @@ def _phase_slice_line_states(status: UbersightStatus, width: int) -> dict[str, s
     return states
 
 
+# Dashboard color pairs as (foreground, background); None is the pane's own
+# background. Dark text on a colored band is never bold: PDCurses, and
+# terminals that render bold as bright, turn bold black into low-contrast
+# grey. Light text may be bold.
+CURSES_COLOR_PAIRS: dict[int, tuple[str, str | None]] = {
+    1: ("CYAN", None),  # phase rows
+    2: ("YELLOW", None),  # active phase or slice
+    3: ("RED", None),  # blocked or failed rows
+    4: ("GREEN", None),  # done rows
+    5: ("BLACK", "GREEN"),  # WORK: SAFE
+    6: ("BLACK", "YELLOW"),  # ORIGIN: OUT-OF-DATE
+    7: ("WHITE", "RED"),  # WORK: CONFLICT and the OPSEC! alarm
+    8: ("BLACK", "CYAN"),  # WORK: CHECK GIT
+    9: ("YELLOW", "BLACK"),  # WORK: PUSH
+    10: ("BLACK", "WHITE"),  # HOST rows and idle data
+    11: ("WHITE", "BLUE"),  # LOC rows
+    12: ("MAGENTA", None),  # routine OPSEC notes
+    13: ("BLACK", "YELLOW"),  # WORK: LOCAL and WORK: PULL
+    14: ("BLACK", "GREEN"),  # Tailscale up and running data
+    15: ("BLACK", "YELLOW"),  # Tailscale down, data errors, form messages
+    16: ("WHITE", "RED"),  # Tailscale logged out
+    17: ("BLACK", "CYAN"),  # Tailscale error
+    18: ("BLACK", "CYAN"),  # hotkey bar and form title
+}
+
+
+def _init_color_pairs(curses_module: Any) -> None:
+    """Register the dashboard color pairs with curses."""
+
+    for pair, (foreground, background) in CURSES_COLOR_PAIRS.items():
+        curses_module.init_pair(
+            pair,
+            getattr(curses_module, f"COLOR_{foreground}"),
+            -1 if background is None else getattr(curses_module, f"COLOR_{background}"),
+        )
+
+
+def _pair_attr(curses_module: Any, pair: int) -> int:
+    """Return a pair's attribute, bold unless its text is dark on a band."""
+
+    foreground, _background = CURSES_COLOR_PAIRS[pair]
+    attr = curses_module.color_pair(pair)
+    if foreground == "BLACK":
+        return attr
+    return attr | curses_module.A_BOLD
+
+
 def _curses_attr_for_line(
     curses_module: Any,
     line: str,
@@ -3261,9 +3308,9 @@ def _curses_attr_for_line(
     if not enable_color:
         return curses_module.A_NORMAL
     if display_state in {"blocked", "failed"}:
-        return curses_module.color_pair(3) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 3)
     if display_state == "active":
-        return curses_module.color_pair(2) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 2)
     if display_state == "done":
         return curses_module.color_pair(4)
     if display_state == "skipped":
@@ -3272,62 +3319,60 @@ def _curses_attr_for_line(
         return curses_module.A_NORMAL
     stripped = line.strip()
     if stripped == _origin_label("synced"):
-        return curses_module.color_pair(5) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 5)
     if stripped == _origin_label("out_of_date"):
-        return curses_module.color_pair(6) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 6)
     if stripped == _origin_label("conflict"):
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped == _origin_label("complicated"):
-        return curses_module.color_pair(8) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 8)
     if stripped == _origin_label("newer"):
-        return curses_module.color_pair(9) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 9)
     if stripped in {"WORK: SAFE, SYNCED", "WORK: SAFE"}:
-        return curses_module.color_pair(5) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 5)
     if stripped in {
         "WORK: UNCOMMITTED LOCAL",
         "WORK: LOCAL",
         "WORK: PULL FIRST",
         "WORK: PULL",
     }:
-        # Black on yellow, deliberately not bold: PDCurses and terminals that
-        # render bold as bright turn bold black into low-contrast grey.
-        return curses_module.color_pair(13)
+        return _pair_attr(curses_module, 13)
     if stripped in {"WORK: UNPUSHED COMMITS", "WORK: PUSH"}:
-        return curses_module.color_pair(9) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 9)
     if stripped in {"WORK: CONFLICT"}:
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped in {"WORK: CHECK GIT", "WORK: CHECK"}:
-        return curses_module.color_pair(8) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 8)
     if stripped.startswith("OPSEC!:"):
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped.startswith("OPSEC:"):
-        return curses_module.color_pair(12) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 12)
     if stripped.startswith("Tailscale:") and stripped.endswith(" UP"):
-        return curses_module.color_pair(14) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 14)
     if stripped.startswith("Tailscale:") and stripped.endswith(" DOWN"):
-        return curses_module.color_pair(15) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 15)
     if stripped == "Tailscale: LOGGED OUT":
-        return curses_module.color_pair(16) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 16)
     if stripped.startswith("Tailscale:"):
-        return curses_module.color_pair(17) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 17)
     if stripped.startswith("DATA") and ("ERROR" in stripped or "INT" in stripped):
-        return curses_module.color_pair(15) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 15)
     if stripped.startswith("DATA") and "IDLE" in stripped:
-        return curses_module.color_pair(10) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 10)
     if stripped.startswith("DATA"):
-        return curses_module.color_pair(14) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 14)
     if stripped.startswith("(R)efresh"):
-        return curses_module.color_pair(18) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 18)
     if line.startswith("HOST:"):
-        return curses_module.color_pair(10) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 10)
     if line.startswith("LOC:"):
-        return curses_module.color_pair(11) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 11)
     if line.startswith("Phase") or line.startswith(" Phase"):
-        return curses_module.color_pair(1) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 1)
     if line.startswith(">"):
-        return curses_module.color_pair(2) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 2)
     if "BLOCKED" in line or "fail" in line:
-        return curses_module.color_pair(3) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 3)
     if "done" in line:
         return curses_module.color_pair(4)
     return curses_module.A_NORMAL
@@ -3428,11 +3473,7 @@ def _draw_location_entry_form(
 
     height, width = stdscr.getmaxyx()
     stdscr.erase()
-    attr_title = (
-        curses_module.color_pair(18) | curses_module.A_BOLD
-        if enable_color
-        else curses_module.A_BOLD
-    )
+    attr_title = _pair_attr(curses_module, 18) if enable_color else curses_module.A_BOLD
     stdscr.addstr(0, 0, _curses_line_text("ENTER LOCATION", width - 1), attr_title)
     rows = [
         "Edit local-only memory for this network.",
@@ -3464,11 +3505,7 @@ def _draw_location_entry_form(
             height - 1,
             0,
             _curses_line_text(message, width - 1),
-            (
-                curses_module.color_pair(15) | curses_module.A_BOLD
-                if enable_color
-                else curses_module.A_BOLD
-            ),
+            (_pair_attr(curses_module, 15) if enable_color else curses_module.A_BOLD),
         )
     stdscr.refresh()
 
@@ -3703,26 +3740,7 @@ def _run_curses(args: argparse.Namespace) -> int:
         if enable_color:
             curses.start_color()
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_YELLOW, -1)
-            curses.init_pair(3, curses.COLOR_RED, -1)
-            curses.init_pair(4, curses.COLOR_GREEN, -1)
-            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_GREEN)
-            curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-            curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_RED)
-            curses.init_pair(8, curses.COLOR_RED, curses.COLOR_CYAN)
-            curses.init_pair(9, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-            curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
-            curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_BLUE)
-            # Routine OPSEC notes are informational: magenta text on the
-            # pane background. Only the public-network alarm gets a band.
-            curses.init_pair(12, curses.COLOR_MAGENTA, -1)
-            curses.init_pair(13, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-            curses.init_pair(14, curses.COLOR_BLACK, curses.COLOR_GREEN)
-            curses.init_pair(15, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-            curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_RED)
-            curses.init_pair(17, curses.COLOR_RED, curses.COLOR_CYAN)
-            curses.init_pair(18, curses.COLOR_WHITE, curses.COLOR_CYAN)
+            _init_color_pairs(curses)
         refresh_seconds = max(0.1, args.refresh_ms / 1000.0)
         force_refresh = False
         while True:

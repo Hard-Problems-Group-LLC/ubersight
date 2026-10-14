@@ -1609,18 +1609,59 @@ def test_tailscale_status_colors_reflect_state() -> None:
         def color_pair(index):
             return index * 100
 
+    # Dark text on a band is plain; light text on a band is bold.
     assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: alpha-bravo UP", True
-    ) == (FakeCurses.color_pair(14) | FakeCurses.A_BOLD)
+    ) == FakeCurses.color_pair(14)
     assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: alpha-bravo DOWN", True
-    ) == (FakeCurses.color_pair(15) | FakeCurses.A_BOLD)
+    ) == FakeCurses.color_pair(15)
     assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: LOGGED OUT", True
     ) == (FakeCurses.color_pair(16) | FakeCurses.A_BOLD)
-    assert ubersight._curses_attr_for_line(FakeCurses, "Tailscale: ERROR", True) == (
-        FakeCurses.color_pair(17) | FakeCurses.A_BOLD
-    )
+    assert ubersight._curses_attr_for_line(
+        FakeCurses, "Tailscale: ERROR", True
+    ) == FakeCurses.color_pair(17)
+
+
+def test_dark_text_on_bands_is_never_bold() -> None:
+    """Bold black renders grey in PDCurses and bold-as-bright terminals."""
+
+    class FakeCurses:
+        A_BOLD = 1
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    for pair, (foreground, background) in ubersight.CURSES_COLOR_PAIRS.items():
+        attr = ubersight._pair_attr(FakeCurses, pair)
+        if foreground == "BLACK":
+            assert background is not None
+            assert attr == FakeCurses.color_pair(pair), pair
+        else:
+            assert attr == FakeCurses.color_pair(pair) | FakeCurses.A_BOLD, pair
+    # No band pairs red text with a cyan background, which is unreadable.
+    assert ("RED", "CYAN") not in ubersight.CURSES_COLOR_PAIRS.values()
+
+
+def test_color_pairs_register_with_curses_constants() -> None:
+    registered: dict[int, tuple[int, int]] = {}
+
+    class FakeCurses:
+        COLOR_BLACK, COLOR_RED, COLOR_GREEN, COLOR_YELLOW = 0, 1, 2, 3
+        COLOR_BLUE, COLOR_MAGENTA, COLOR_CYAN, COLOR_WHITE = 4, 5, 6, 7
+
+        @staticmethod
+        def init_pair(pair, foreground, background):
+            registered[pair] = (foreground, background)
+
+    ubersight._init_color_pairs(FakeCurses)
+
+    assert sorted(registered) == list(range(1, 19))
+    assert registered[1] == (FakeCurses.COLOR_CYAN, -1)
+    assert registered[8] == (FakeCurses.COLOR_BLACK, FakeCurses.COLOR_CYAN)
+    assert registered[13] == (FakeCurses.COLOR_BLACK, FakeCurses.COLOR_YELLOW)
 
 
 def test_load_background_jobs_reads_live_status_files(tmp_path: Path) -> None:
