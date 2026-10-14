@@ -23,6 +23,12 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   2026-10-14T00:44:00-07:00 - Slice 13 landed the cross-platform stop
   and restart workflow (`ubersight --supervise` and a Windows-capable
   `ubersight-stop`). Slices 14 and 16 remain.
+  2026-10-14T01:55:00-07:00 - Slice 14 landed:
+  - Windows gateway, subnet, and WiFi probes;
+  - wired detection and the `Ethernet (<LAN name>)` display;
+  - the `user@host` footer rows;
+  - the redesigned location editor.
+  Only Slice 16 remains. Per-user location state is tracked as a bug.
 
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own

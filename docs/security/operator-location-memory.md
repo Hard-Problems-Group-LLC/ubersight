@@ -56,6 +56,7 @@ A known-location record has this shape:
 {
   "id": "opaque-local-id",
   "label": "Example Home Office",
+  "lan_name": "Example Wired LAN",
   "opsec_level": "private-trusted",
   "confidence_threshold": 80,
   "display": {
@@ -86,6 +87,13 @@ literal SSID is useful for human maintenance. BSSIDs and gateway MAC addresses
 are stored only as salted hashes. Local subnets and coarse geolocation are
 weak matchers; they should not identify a location by themselves unless an
 operator deliberately lowers a record's threshold.
+
+`lan_name` is optional. It names a wired LAN, and the dashboard shows it as
+`Ethernet (<lan_name>)` when the operator is on a cable. On Ethernet the
+router's MAC address stands in for an SSID, and a gateway match alone
+scores 100, enough for the default threshold of 80. The location editor
+shows the raw router MAC and access-point BSSID on screen so the operator
+can recognize them. Only the salted hashes are stored.
 
 ## Matching
 

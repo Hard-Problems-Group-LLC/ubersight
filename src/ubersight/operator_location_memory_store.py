@@ -39,6 +39,9 @@ class LocationObservation:
     gateway_macs: tuple[str, ...] = ()
     network_estimate: Any | None = None
     observed_at: datetime | None = None
+    # True only when the WiFi probe affirmatively found no WLAN connection
+    # while a default gateway was reachable: the operator is on a cable.
+    wired: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,7 @@ def observation_to_mapping(observation: LocationObservation) -> dict[str, Any]:
         "wifi_bssid": observation.wifi_bssid,
         "local_subnets": list(observation.local_subnets),
         "gateway_macs": list(observation.gateway_macs),
+        "wired": observation.wired,
         "network_estimate": network_estimate_to_mapping(observation.network_estimate),
     }
 
@@ -378,8 +382,17 @@ def learn_location_memory(
     memory_path: Path = DEFAULT_LOCATION_MEMORY_PATH,
     salt_path: Path = DEFAULT_LOCATION_MEMORY_SALT_PATH,
     include_geo: bool = True,
+    lan_name: str | None = None,
+    record_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create or update a local-only known-location record."""
+    """Create or update a local-only known-location record.
+
+    With `record_id`, that record is updated even when its label changes,
+    so renaming a place in the editor never duplicates it. Without one,
+    the record is found by label, as the command-line helper expects.
+    `lan_name` names a wired LAN, shown as `Ethernet (<name>)`; None leaves
+    it unchanged and an empty string clears it.
+    """
 
     label = label.strip()
     if not label:
@@ -387,14 +400,20 @@ def learn_location_memory(
     salt = load_location_memory_salt(salt_path, create=True)
     records = load_location_memory(memory_path)
     now = local_now().isoformat(timespec="seconds")
-    record = next(
-        (
-            item
-            for item in records
-            if str(item.get("label", "")).casefold() == label.casefold()
-        ),
-        None,
-    )
+    if record_id:
+        record = next(
+            (item for item in records if str(item.get("id", "")) == record_id),
+            None,
+        )
+    else:
+        record = next(
+            (
+                item
+                for item in records
+                if str(item.get("label", "")).casefold() == label.casefold()
+            ),
+            None,
+        )
     if record is None:
         record = {
             "id": secrets.token_hex(16),
@@ -405,6 +424,8 @@ def learn_location_memory(
     record["label"] = label
     record["updated_at"] = now
     record["opsec_level"] = opsec_level.strip() or "private-trusted"
+    if lan_name is not None:
+        record["lan_name"] = lan_name.strip()
     if confidence_threshold is not None:
         if confidence_threshold <= 0:
             raise ValueError("confidence threshold must be greater than zero")

@@ -37,7 +37,7 @@ Active phase slices:
 * Slice 11: Fix Windows runtime blockers, done.
 * Slice 12: Add Windows process identity, done.
 * Slice 13: Port stop and restart workflow, done.
-* Slice 14: Add Windows network probes, planned.
+* Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.
 
@@ -50,10 +50,11 @@ records the operator's decisions.
 Done:
 - Slices 11 and 12: runtime blockers and process identity.
 - Slice 13: `ubersight --supervise` and a Windows-capable `ubersight-stop`.
+- Slice 14: Windows network probes, `Ethernet (<LAN name>)`, and the
+  redesigned location editor.
 - Slice 15: `install.ps1` and the Windows stage two.
 
 Remaining:
-- Slice 14: Windows network and location probes.
 - Slice 16: removing the last 15 Windows test skips.
 
 Phase 12 (`ubersight-autosplit`) builds on this branch from

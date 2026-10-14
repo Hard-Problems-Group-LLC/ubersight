@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: In progress (Slices 11, 12, 13, and 15 implemented)  
+Status: In progress (Slices 11 through 15 implemented)  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -181,6 +181,59 @@ including Q.
 Once Phase 12 merges this slice, `ubersight-autosplit` starts its dashboard
 pane with `--supervise`.
 
+## Slice 14: Network and Location Probes
+
+On Ethernet, the router's identity stands in for an SSID: the default
+gateway's MAC address. Location memory already matches on it, so a wired
+location can be learned with `E` and recognized later.
+
+### Probes
+
+The Windows probes run as fallback tiers after the existing Linux tools.
+Those tools fail fast on Windows, and the Windows tools fail fast on
+Linux, so neither platform's behavior depends on detection.
+
+| Signal | Windows source | Notes |
+| --- | --- | --- |
+| Default gateways | `route print -4 0.0.0.0` | Rows whose destination and netmask are both `0.0.0.0` give the gateway and interface address. |
+| Gateway MAC | `arp -a <gateway> -N <interface>` | Dash-separated MACs are normalized to lower-case colon form. |
+| Local subnets | `route print -4` | On-link rows on interfaces that carry a default route. Host, loopback, link-local, and multicast routes are excluded, as is any interface without a default route, such as a VPN tunnel. |
+| WiFi SSID and BSSID | `netsh wlan show interfaces` | Reads the `SSID` and `BSSID` (or `AP BSSID`) lines. |
+
+All of these parse addresses and fixed column positions rather than
+translated labels, so they work in any Windows display language.
+
+### Limits
+
+- Windows 11 can withhold WLAN details from command-line tools unless
+  location services are enabled for desktop apps. The WiFi name then reads
+  `unknown`, while gateway-based recognition keeps working.
+- Linux keeps its existing tools. Their broken `iwconfig` tier, which
+  passed a string where a tuple was meant, is fixed.
+
+### Output decoding
+
+Probe output is decoded as UTF-8 when it is valid UTF-8. Otherwise, on
+Windows, it is decoded with the OEM code page that console tools use, so
+non-ASCII WiFi names survive.
+
+### Wired connections
+
+When the WiFi probe affirmatively reports no WLAN connection and a default
+gateway has a MAC address, the observation is marked wired. The footer then
+replaces `WIFI: <ssid>` with `Ethernet (<label>)`, where the label is the
+location-memory record's Label, named with the `E` editor. Until the LAN is
+named, the footer shows `Ethernet (unknown LAN)`. LAN names live in
+location memory under `.local/` for now and move with the per-user state
+fix. A WLAN query withheld for
+location permission never counts as "no connection". On Linux, the wired
+mark is reserved for a future slice.
+
+### Per-user state
+
+Location state is still per project. Moving it to a per-user store is
+tracked as `project-management/bugs/open/per-user-operator-location-state.md`.
+
 ## Slice 15: Install Path
 
 ### Stage one
@@ -249,7 +302,6 @@ installer refuses such a home unless `--user-home` or
 
 These slices get their own requirements when they start:
 
-- 14: network and location probes
 - 16: test-suite parity
 
 Until Slice 16 lands, 15 installer tests in `tests/test_bootstrap.py`
