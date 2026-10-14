@@ -19,7 +19,7 @@ untracked.
 Recent phases:
 
 * Phase 10: Execution-layer failure forensics, done.
-* Phase 11: Native Windows support, in progress (Slices 11-13 and 15 done).
+* Phase 11: Native Windows support, in progress (Slices 11-15 done).
 
 Active phase:
 
@@ -41,7 +41,7 @@ Active phase slices:
 Paused Phase 11 slices:
 
 * Slice 13: Port stop and restart workflow, done.
-* Slice 14: Add Windows network probes, planned.
+* Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.
 
@@ -58,5 +58,4 @@ Status:
 - The dashboard pane runs under `ubersight --supervise`, so
   `ubersight-stop` restarts it in place.
 - The Linux backends still await live operator verification.
-- Phase 11 has Slices 14 (network probes) and 16 (Windows test parity)
-  remaining.
+- Phase 11 has only Slice 16 (Windows test parity) remaining.

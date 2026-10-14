@@ -44,8 +44,18 @@ In live mode, Ubersight exposes a local hotkey bar:
 
 - `R`: force-refresh Git, local network, geolocation, Tailscale, process, and
   background-job status on the next draw.
-- `E`: open the local-only location-memory editor for the current network
-  BSSID or gateway/router MAC.
+- `E`: open the local-only location-memory editor for the current network.
+  - **On WiFi**, it shows the network and access point, and you name the
+    Place.
+  - **On Ethernet**, it shows the router's MAC address and subnet, and you
+    name both the LAN, shown as `Ethernet (<name>)`, and the Place.
+  - **Fields:** Detail adds a finer location. OPSEC cycles with Left/Right
+    or Space. Threshold sets the match confidence.
+  - **Keys:** Up/Down or Tab moves between fields, Enter saves, and Esc
+    cancels. Every printable character can be typed, including `q`.
+
+  Saving updates the record that matched the current network, so renaming
+  a place never duplicates it.
 - `Q`: quit Ubersight.
 
 Print a one-shot text snapshot, useful for tests or log capture:

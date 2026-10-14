@@ -176,11 +176,18 @@ class OperatorLocationStatus:
     opsec_level: str = ""
     network_observed_at: datetime | None = None
     network_fingerprint: str = ""
+    wired: bool = False
+    # Label of the matched location-memory record, as named with `E`.
+    network_label: str = ""
 
 
 @dataclass(frozen=True)
 class LocationEntryDefaults:
-    """Prefill values for the interactive local location-memory editor."""
+    """Prefill values for the interactive local location-memory editor.
+
+    `record_id` names the matched record, so saving updates it even when
+    the place is renamed.
+    """
 
     label: str
     fine_location: str
@@ -188,7 +195,8 @@ class LocationEntryDefaults:
     confidence_threshold: float
     matched: bool
     stable_identity: bool
-    identity_summary: str
+    lan_name: str = ""
+    record_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -348,8 +356,6 @@ def _run_command(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout_seconds,
             check=False,
         )
@@ -358,9 +364,34 @@ def _run_command(
     return CommandResult(
         tuple(args),
         completed.returncode,
-        completed.stdout,
-        completed.stderr,
+        _decode_probe_output(completed.stdout),
+        _decode_probe_output(completed.stderr),
     )
+
+
+def _decode_probe_output(data: bytes | str | None) -> str:
+    """Decode probe output without ever raising.
+
+    Git, Tailscale, and modern tools write UTF-8. Windows console tools such
+    as `netsh` write the OEM code page when piped, so non-ASCII WiFi names
+    need that codec once UTF-8 fails. Anything else is decoded with
+    replacement characters.
+    """
+
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if _is_windows():
+        try:
+            return data.decode("oem")
+        except (LookupError, UnicodeDecodeError):
+            pass
+    return data.decode("utf-8", errors="replace")
 
 
 def _coerce_status_row(raw: Any, *, id_key: str) -> tuple[str, str, str] | None:
@@ -1309,6 +1340,8 @@ def _coerce_location_status(raw: dict[str, Any]) -> OperatorLocationStatus | Non
         opsec_level=str(raw.get("opsec_level", "")).strip(),
         network_observed_at=_parse_timestamp(raw.get("network_observed_at")),
         network_fingerprint=str(raw.get("network_fingerprint", "")).strip(),
+        wired=raw.get("wired") is True,
+        network_label=str(raw.get("network_label", "")).strip(),
     )
 
 
@@ -1338,6 +1371,8 @@ def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
         "opsec_level": status.opsec_level,
         "source": status.source,
         "network_fingerprint": status.network_fingerprint,
+        "wired": status.wired,
+        "network_label": status.network_label,
         "network_observed_at": (
             status.network_observed_at or status.updated_at or _local_now()
         ).isoformat(timespec="seconds"),
@@ -1359,17 +1394,25 @@ def observe_operator_location(
     network_estimate = (
         _geolocation_from_ip(urlopen_func=urlopen_func) if geolocate else None
     )
+    wifi_ssid = _active_wifi_ssid(run_command=run_command, fallback_ssid=fallback_ssid)
+    gateway_macs = _default_gateway_macs(run_command=run_command)
+    # Wired only when WiFi is affirmatively off-line: a WLAN query that
+    # Windows withholds for location permission must not read as a cable.
+    wired = (
+        wifi_ssid == "unknown"
+        and bool(gateway_macs)
+        and _wifi_reported_disconnected(run_command)
+    )
     return location_memory.LocationObservation(
         hostname=socket.gethostname(),
         username=getpass.getuser(),
-        wifi_ssid=_active_wifi_ssid(
-            run_command=run_command, fallback_ssid=fallback_ssid
-        ),
+        wifi_ssid=wifi_ssid,
         wifi_bssid=_active_wifi_bssid(run_command=run_command),
         local_subnets=_local_ipv4_subnets(run_command=run_command),
-        gateway_macs=_default_gateway_macs(run_command=run_command),
+        gateway_macs=gateway_macs,
         network_estimate=network_estimate,
         observed_at=_local_now(),
+        wired=wired,
     )
 
 
@@ -1394,18 +1437,22 @@ def _active_wifi_bssid(run_command: Any = _run_command) -> str:
             match = re.search(r"Connected to ([0-9a-fA-F:]{17})", link.stdout)
             if match:
                 return match.group(1).lower()
-    return ""
+    return _wifi_bssid_from_netsh(run_command)
 
 
 def _local_ipv4_subnets(run_command: Any = _run_command) -> tuple[str, ...]:
-    """Return globally scoped local IPv4 networks visible to this session."""
+    """Return globally scoped local IPv4 networks visible to this session.
+
+    Linux reads `ip addr`; Windows, where `ip` does not exist, falls back to
+    the on-link routes of interfaces that carry a default route.
+    """
 
     result = run_command(
         ("ip", "-o", "-4", "addr", "show", "scope", "global"),
         timeout_seconds=3.0,
     )
     if result.returncode != 0:
-        return ()
+        return _windows_local_subnets(run_command)
     subnets: list[str] = []
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -1425,11 +1472,15 @@ def _local_ipv4_subnets(run_command: Any = _run_command) -> tuple[str, ...]:
 def _default_gateway_routes(
     run_command: Any = _run_command,
 ) -> tuple[tuple[str, str], ...]:
-    """Return default route `(interface, gateway-ip)` pairs."""
+    """Return default route `(interface, gateway-ip)` pairs.
+
+    Linux names the interface (`eth0`); the Windows fallback identifies it
+    by its IPv4 address, which `arp -N` accepts.
+    """
 
     result = run_command(("ip", "route", "show", "default"), timeout_seconds=3.0)
     if result.returncode != 0:
-        return ()
+        return _windows_default_routes(run_command)
     routes: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -1456,10 +1507,16 @@ def _default_gateway_interfaces(run_command: Any = _run_command) -> tuple[str, .
 
 
 def _normalized_mac(value: str) -> str:
-    """Return a normalized MAC address found in `value`, if any."""
+    """Return a normalized MAC address found in `value`, if any.
 
-    match = re.search(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b", value)
-    return match.group(0).lower() if match else ""
+    Accepts colon form (Linux) and dash form (Windows `arp`), and returns
+    lower-case colon form so stored signals match across platforms.
+    """
+
+    match = re.search(
+        r"\b[0-9a-fA-F]{2}([:-])[0-9a-fA-F]{2}(?:\1[0-9a-fA-F]{2}){4}\b", value
+    )
+    return match.group(0).replace("-", ":").lower() if match else ""
 
 
 def _neighbor_mac_for_gateway(
@@ -1485,7 +1542,7 @@ def _neighbor_mac_for_gateway(
         timeout_seconds=3.0,
     )
     if neighbors.returncode != 0:
-        return ""
+        return _windows_gateway_mac(gateway_ip, interface, run_command)
     for line in neighbors.stdout.splitlines():
         parts = line.split()
         if parts and parts[0] == gateway_ip:
@@ -1506,6 +1563,182 @@ def _default_gateway_macs(run_command: Any = _run_command) -> tuple[str, ...]:
         if mac and mac != "00:00:00:00:00:00" and mac not in macs:
             macs.append(mac)
     return tuple(macs)
+
+
+def _ipv4(value: str) -> ipaddress.IPv4Address | None:
+    """Return `value` as an IPv4 address, or None when it is not one."""
+
+    try:
+        return ipaddress.IPv4Address(value)
+    except ValueError:
+        return None
+
+
+def _parse_windows_default_routes(output: str) -> tuple[tuple[str, str], ...]:
+    """Parse `route print -4` rows into `(interface-ip, gateway-ip)` pairs.
+
+    Default-route rows read `0.0.0.0 0.0.0.0 <gateway> <interface> <metric>`.
+    Matching addresses and column positions instead of translated headings
+    keeps this working in every Windows display language. The interface is
+    read from the right: some languages translate `On-link` into several
+    words, which shifts every column counted from the left.
+    """
+
+    routes: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0] != "0.0.0.0" or fields[1] != "0.0.0.0":
+            continue
+        gateway, interface = fields[2], fields[-2]
+        if _ipv4(gateway) is None or _ipv4(interface) is None:
+            continue
+        if (interface, gateway) not in routes:
+            routes.append((interface, gateway))
+    return tuple(routes)
+
+
+def _parse_windows_local_subnets(
+    output: str, interface_ips: Sequence[str]
+) -> tuple[str, ...]:
+    """Parse on-link `route print -4` rows into subnets of the given interfaces.
+
+    A row counts when its destination is the network of its interface
+    address under its netmask. Host, default, loopback, link-local, and
+    multicast routes are skipped.
+    """
+
+    wanted = set(interface_ips)
+    subnets: list[str] = []
+    for line in output.splitlines():
+        fields = line.split()
+        # The interface is the second-to-last column; see the note on
+        # translated `On-link` text in `_parse_windows_default_routes`.
+        if len(fields) < 5 or fields[-2] not in wanted:
+            continue
+        destination, netmask, interface = fields[0], fields[1], fields[-2]
+        if _ipv4(destination) is None or _ipv4(netmask) is None:
+            continue
+        if netmask in {"0.0.0.0", "255.255.255.255"}:
+            continue
+        try:
+            network = ipaddress.IPv4Network(f"{destination}/{netmask}")
+            own_network = ipaddress.IPv4Interface(f"{interface}/{netmask}").network
+        except ValueError:
+            continue
+        if network != own_network:
+            continue
+        if network.is_loopback or network.is_link_local or network.is_multicast:
+            continue
+        label = str(network)
+        if label not in subnets:
+            subnets.append(label)
+    return tuple(subnets)
+
+
+def _windows_route_table(run_command: Any) -> str:
+    """Return `route print -4` output, or an empty string when unavailable."""
+
+    result = run_command(("route", "print", "-4"), timeout_seconds=3.0)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _windows_default_routes(run_command: Any) -> tuple[tuple[str, str], ...]:
+    """Return Windows default routes as `(interface-ip, gateway-ip)` pairs."""
+
+    return _parse_windows_default_routes(_windows_route_table(run_command))
+
+
+def _windows_local_subnets(run_command: Any) -> tuple[str, ...]:
+    """Return subnets of Windows interfaces that carry a default route.
+
+    Interfaces without a default route, such as VPN tunnels, look the same
+    everywhere and would only blur location matching.
+    """
+
+    table = _windows_route_table(run_command)
+    interfaces = [interface for interface, _ in _parse_windows_default_routes(table)]
+    if not interfaces:
+        return ()
+    return _parse_windows_local_subnets(table, interfaces)
+
+
+def _windows_gateway_mac(gateway_ip: str, interface_ip: str, run_command: Any) -> str:
+    """Return a gateway's MAC address from the Windows ARP cache."""
+
+    if _ipv4(gateway_ip) is None or _ipv4(interface_ip) is None:
+        return ""
+    result = run_command(
+        ("arp", "-a", gateway_ip, "-N", interface_ip), timeout_seconds=3.0
+    )
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == gateway_ip:
+            return _normalized_mac(fields[1])
+    return ""
+
+
+def _netsh_wlan_output(run_command: Any) -> str | None:
+    """Return `netsh wlan show interfaces` output, or None when unavailable."""
+
+    result = run_command(("netsh", "wlan", "show", "interfaces"), timeout_seconds=3.0)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _parse_netsh_ssid(output: str) -> str:
+    """Return the connected SSID from `netsh wlan show interfaces` output."""
+
+    for line in output.splitlines():
+        match = re.match(r"^\s*SSID\s*:\s*(.*?)\s*$", line)
+        if match and match.group(1):
+            return match.group(1)
+    return "unknown"
+
+
+def _parse_netsh_bssid(output: str) -> str:
+    """Return the connected access point's BSSID from netsh output.
+
+    Newer Windows 11 builds label it `AP BSSID`; older builds use `BSSID`.
+    """
+
+    for line in output.splitlines():
+        if re.match(r"^\s*(?:AP\s+)?BSSID\s*:", line):
+            mac = _normalized_mac(line)
+            if mac:
+                return mac
+    return ""
+
+
+def _active_wifi_from_netsh(run_command: Any) -> str:
+    """Return the WiFi SSID through netsh, the Windows inspection tier."""
+
+    output = _netsh_wlan_output(run_command)
+    return "unknown" if output is None else _parse_netsh_ssid(output)
+
+
+def _wifi_bssid_from_netsh(run_command: Any) -> str:
+    """Return the WiFi BSSID through netsh, or an empty string."""
+
+    output = _netsh_wlan_output(run_command)
+    return "" if output is None else _parse_netsh_bssid(output)
+
+
+def _wifi_reported_disconnected(run_command: Any) -> bool:
+    """Return whether the WLAN service affirmatively reports no connection.
+
+    netsh succeeding without an SSID means the WiFi adapters are
+    disconnected, turned off, or absent. Output that mentions location
+    permission means Windows withheld the details, which proves nothing.
+    Where netsh does not exist, as on Linux, nothing is affirmed.
+    """
+
+    output = _netsh_wlan_output(run_command)
+    if output is None:
+        return False
+    if "location" in output.casefold():
+        return False
+    return _parse_netsh_ssid(output) == "unknown"
 
 
 def _location_network_fingerprint(
@@ -1560,6 +1793,8 @@ def _status_from_location_memory_match(
         opsec_level=str(record.get("opsec_level", "")).strip(),
         network_observed_at=now,
         network_fingerprint=_location_network_fingerprint(observation),
+        wired=observation.wired,
+        network_label=str(record.get("lan_name", "")).strip(),
     )
 
 
@@ -1599,6 +1834,7 @@ def _active_wifi_ssid(
         _active_wifi_from_nmcli_scan,
         _active_wifi_from_nmcli_connection,
         _active_wifi_from_wireless_tools,
+        _active_wifi_from_netsh,
     ):
         ssid = inspector(run_command)
         if ssid != "unknown":
@@ -1660,7 +1896,7 @@ def _active_wifi_from_wireless_tools(run_command: Any) -> str:
             ssid = _ssid_from_iw_link(link.stdout)
             if ssid != "unknown":
                 return ssid
-    iwconfig = run_command(("iwconfig"), timeout_seconds=3.0)
+    iwconfig = run_command(("iwconfig",), timeout_seconds=3.0)
     if iwconfig.returncode == 0:
         ssid = _ssid_from_iwconfig(iwconfig.stdout)
         if ssid != "unknown":
@@ -2224,7 +2460,12 @@ def load_or_refresh_operator_location(
                 urlopen_func=urlopen_func,
                 fallback_ssid="",
             )
-            if network_observation.wifi_ssid == "unknown":
+            # An unknown SSID usually means a failed WiFi probe, so the
+            # cache wins; on a cable it is the normal state.
+            if (
+                network_observation.wifi_ssid == "unknown"
+                and not network_observation.wired
+            ):
                 return cached
             if _same_operator_network(cached, network_observation):
                 refreshed_network = replace(
@@ -2236,6 +2477,7 @@ def load_or_refresh_operator_location(
                     network_fingerprint=_location_network_fingerprint(
                         network_observation
                     ),
+                    wired=network_observation.wired,
                 )
                 _write_location_cache(cache_path, refreshed_network)
                 return refreshed_network
@@ -2326,6 +2568,7 @@ def load_or_refresh_operator_location(
         opsec_level="public" if wifi_hotspot else "",
         network_observed_at=now,
         network_fingerprint=_location_network_fingerprint(observation),
+        wired=observation.wired,
     )
     _write_location_cache(cache_path, refreshed)
     location_memory.append_location_observation(observation_log_path, observation)
@@ -2614,21 +2857,37 @@ def _visible_phase_stack(status: UbersightStatus) -> tuple[PhaseStatus, ...]:
     return status.phases[start:end]
 
 
+# Display state for the operator identity rows, which have no text prefix.
+HOST_STATE = "host"
+
+
+def _operator_identity_lines(
+    status: OperatorLocationStatus, width: int
+) -> tuple[str, str]:
+    """Return the `user@host` row and the network row below it.
+
+    The network row is `WIFI: <ssid>` or, on a cable, `Ethernet (<label>)`.
+    """
+
+    return (
+        _ellipsize(f"{status.username}@{status.hostname}", width),
+        _ellipsize(_network_display_segment(status), width),
+    )
+
+
 def _operator_footer_lines(
     status: OperatorLocationStatus,
     width: int,
     *,
     max_lines_per_status: int = 1,
 ) -> tuple[str, ...]:
-    first = f"{status.hostname}  USER: {status.username}"
-    first += f"  WIFI: {_safe_wifi_display_label(status)}"
     attribution = _operator_location_attribution_suffix(status)
     second = (
         status.location if status.fine_location else f"{status.location}{attribution}"
     )
-    lines = _wrapped_labeled_status_lines(
-        "HOST", first, width, max_lines_per_status
-    ) + _wrapped_labeled_status_lines("LOC", second, width, max_lines_per_status)
+    lines = _operator_identity_lines(status, width) + _wrapped_labeled_status_lines(
+        "LOC", second, width, max_lines_per_status
+    )
     if status.fine_location:
         lines += _wrapped_labeled_status_lines(
             "LOC",
@@ -2646,6 +2905,18 @@ def _safe_wifi_display_label(status: OperatorLocationStatus) -> str:
     if not status.wifi_ssid or status.wifi_ssid == "unknown":
         return "unknown"
     return status.wifi_ssid
+
+
+def _network_display_segment(status: OperatorLocationStatus) -> str:
+    """Return the footer's network segment: the WiFi name, or the wired LAN.
+
+    On a cable the router stands in for an SSID, and the LAN is shown by
+    the label the operator gave this place in the location editor.
+    """
+
+    if status.wired:
+        return f"Ethernet ({status.network_label or 'unknown LAN'})"
+    return f"WIFI: {_safe_wifi_display_label(status)}"
 
 
 def _operator_location_attribution_suffix(status: OperatorLocationStatus) -> str:
@@ -3315,6 +3586,8 @@ def _curses_attr_for_line(
         return curses_module.color_pair(4)
     if display_state == "skipped":
         return curses_module.color_pair(8)
+    if display_state == HOST_STATE:
+        return _pair_attr(curses_module, 10)
     if display_state == "pending":
         return curses_module.A_NORMAL
     stripped = line.strip()
@@ -3363,8 +3636,6 @@ def _curses_attr_for_line(
         return _pair_attr(curses_module, 14)
     if stripped.startswith("(R)efresh"):
         return _pair_attr(curses_module, 18)
-    if line.startswith("HOST:"):
-        return _pair_attr(curses_module, 10)
     if line.startswith("LOC:"):
         return _pair_attr(curses_module, 11)
     if line.startswith("Phase") or line.startswith(" Phase"):
@@ -3402,18 +3673,31 @@ def _line_uses_full_width_background(line: str) -> bool:
         or stripped.startswith("Tailscale:")
         or stripped.startswith("DATA")
         or stripped.startswith("(R)efresh")
-        or line.startswith("HOST:")
         or line.startswith("LOC:")
     )
 
 
-def _curses_line_text(line: str, width: int) -> str:
-    """Prepare a rendered row, preserving colored-band background coverage."""
+def _curses_line_text(line: str, width: int, *, band: bool = False) -> str:
+    """Prepare a rendered row, preserving colored-band background coverage.
+
+    `band` marks rows whose band is known from data rather than from a text
+    prefix, such as the operator identity rows.
+    """
 
     text = _clip_preserve_spaces(line, width)
-    if _line_uses_full_width_background(line):
+    if band or _line_uses_full_width_background(line):
         return text.ljust(width)
     return text
+
+
+OPSEC_LEVELS = ("private-trusted", "private", "public", "unknown")
+ENTRY_LAN_NAME = "LAN name"
+ENTRY_PLACE = "Place"
+ENTRY_DETAIL = "Detail"
+ENTRY_OPSEC = "OPSEC"
+ENTRY_THRESHOLD = "Threshold"
+ENTRY_CANCEL = "cancel"
+ENTRY_SAVE = "save"
 
 
 def _location_entry_defaults(
@@ -3431,42 +3715,134 @@ def _location_entry_defaults(
     display = record.get("display")
     if not isinstance(display, dict):
         display = {}
-    label = str(record.get("label", "")).strip()
-    fine_location = str(display.get("fine", "")).strip()
     opsec_level = str(record.get("opsec_level", "")).strip()
-    if opsec_level not in {"private-trusted", "private", "public", "unknown"}:
+    if opsec_level not in OPSEC_LEVELS:
         opsec_level = (
             "public" if _network_is_public(observation.wifi_ssid) else "unknown"
         )
     default_threshold = 100.0 if _network_is_public(observation.wifi_ssid) else 80.0
     threshold = _float_or_none(record.get("confidence_threshold")) or default_threshold
-    identity_parts = []
-    if observation.wifi_bssid:
-        identity_parts.append("WiFi BSSID captured")
-    if observation.gateway_macs:
-        identity_parts.append(f"router MACs captured: {len(observation.gateway_macs)}")
-    if not identity_parts:
-        identity_parts.append("no stable BSSID/router MAC captured")
     return LocationEntryDefaults(
-        label=label,
-        fine_location=fine_location,
+        label=str(record.get("label", "")).strip(),
+        fine_location=str(display.get("fine", "")).strip(),
         opsec_level=opsec_level,
         confidence_threshold=threshold,
         matched=bool(record),
         stable_identity=bool(observation.wifi_bssid or observation.gateway_macs),
-        identity_summary=", ".join(identity_parts),
+        lan_name=str(record.get("lan_name", "")).strip(),
+        record_id=str(record.get("id", "")).strip(),
     )
+
+
+def _location_entry_fields(
+    defaults: LocationEntryDefaults, *, wired: bool
+) -> list[tuple[str, str]]:
+    """Return the editor's fields; a wired network also gets a LAN name."""
+
+    fields = [(ENTRY_LAN_NAME, defaults.lan_name)] if wired else []
+    return fields + [
+        (ENTRY_PLACE, defaults.label),
+        (ENTRY_DETAIL, defaults.fine_location),
+        (ENTRY_OPSEC, defaults.opsec_level),
+        (ENTRY_THRESHOLD, f"{defaults.confidence_threshold:g}"),
+    ]
+
+
+def _location_entry_header(
+    observation: location_memory.LocationObservation,
+    defaults: LocationEntryDefaults,
+) -> tuple[str, list[str]]:
+    """Return the editor title and the network, help, and status rows.
+
+    Raw router and access-point addresses are shown here for the operator
+    to recognize; location memory stores only their salted hashes.
+    """
+
+    routers = ", ".join(observation.gateway_macs)
+    if observation.wired:
+        title = "NAME THIS NETWORK"
+        rows = [
+            f"Wired LAN via router {routers}",
+            f"Subnet: {', '.join(observation.local_subnets) or 'unknown'}",
+        ]
+    else:
+        title = "NAME THIS LOCATION"
+        if observation.wifi_ssid != "unknown":
+            rows = [
+                f"WiFi: {observation.wifi_ssid}",
+                f"Access point: {observation.wifi_bssid or 'not captured'}",
+            ]
+        else:
+            rows = ["WiFi name not available"]
+        if routers:
+            rows.append(f"Router: {routers}")
+    rows += ["Up/Down: field  Left/Right: OPSEC", "Enter: save  Esc: cancel"]
+    if not defaults.stable_identity:
+        rows.append("No access point or router captured; cannot save.")
+    elif defaults.matched:
+        rows.append("Editing the saved record for this network.")
+    return title, rows
+
+
+def _cycle_opsec(value: str, step: int) -> str:
+    """Return the OPSEC level `step` places from `value`, wrapping around."""
+
+    index = OPSEC_LEVELS.index(value) if value in OPSEC_LEVELS else -1
+    return OPSEC_LEVELS[(index + step) % len(OPSEC_LEVELS)]
+
+
+def _apply_location_entry_key(
+    fields: list[tuple[str, str]],
+    active_index: int,
+    key: Any,
+    curses_module: Any,
+) -> tuple[list[tuple[str, str]], int, str | None]:
+    """Apply one key to the editor form.
+
+    Returns the updated fields, the active field index, and an action:
+    `save`, `cancel`, or None. Keys come from `get_wch` (strings for
+    characters) or `getch` (integer codes). Only Esc cancels, so every
+    printable character, including `q`, can be typed. The OPSEC field
+    cycles through its fixed levels instead of accepting text.
+    """
+
+    def code(name: str) -> Any:
+        return getattr(curses_module, name, None)
+
+    if key in ("\x1b", 27):
+        return fields, active_index, ENTRY_CANCEL
+    if key in ("\n", "\r", 10, 13, code("KEY_ENTER"), code("KEY_F2")):
+        return fields, active_index, ENTRY_SAVE
+    if key in (code("KEY_UP"), code("KEY_BTAB")):
+        return fields, (active_index - 1) % len(fields), None
+    if key in (code("KEY_DOWN"), "\t", 9):
+        return fields, (active_index + 1) % len(fields), None
+    label, value = fields[active_index]
+    updated = list(fields)
+    if label == ENTRY_OPSEC:
+        if key == code("KEY_LEFT"):
+            updated[active_index] = (label, _cycle_opsec(value, -1))
+        elif key in (code("KEY_RIGHT"), " "):
+            updated[active_index] = (label, _cycle_opsec(value, 1))
+        return updated, active_index, None
+    if key in (code("KEY_BACKSPACE"), "\b", "\x7f", 8, 127):
+        updated[active_index] = (label, value[:-1])
+    elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+        updated[active_index] = (label, value + key)
+    elif isinstance(key, int) and 32 <= key <= 126:
+        updated[active_index] = (label, value + chr(key))
+    return updated, active_index, None
 
 
 def _draw_location_entry_form(
     stdscr: Any,
     curses_module: Any,
     *,
+    title: str,
+    rows: Sequence[str],
     fields: list[tuple[str, str]],
     active_index: int,
     message: str,
-    defaults: LocationEntryDefaults,
-    observation: location_memory.LocationObservation,
     enable_color: bool,
 ) -> None:
     """Draw the local-memory editor page."""
@@ -3474,37 +3850,31 @@ def _draw_location_entry_form(
     height, width = stdscr.getmaxyx()
     stdscr.erase()
     attr_title = _pair_attr(curses_module, 18) if enable_color else curses_module.A_BOLD
-    stdscr.addstr(0, 0, _curses_line_text("ENTER LOCATION", width - 1), attr_title)
-    rows = [
-        "Edit local-only memory for this network.",
-        f"SSID: {observation.wifi_ssid}",
-        defaults.identity_summary,
-        "Tab/Up/Down: field  Enter/F2: save  Esc: cancel",
-    ]
-    if not defaults.stable_identity:
-        rows.append("Cannot save until a BSSID or router MAC is captured.")
-    if defaults.matched:
-        rows.append("Existing local record matched; save updates that label.")
-    for index, row in enumerate(rows, start=2):
-        if index >= height - 1:
+    stdscr.addstr(0, 0, _curses_line_text(title, width - 1, band=True), attr_title)
+    y = 2
+    for row in rows:
+        if y >= height - 1:
             break
-        stdscr.addstr(index, 0, _ellipsize(row, width - 1))
-    start_y = min(8, max(5, len(rows) + 3))
+        stdscr.addstr(y, 0, _ellipsize(row, width - 1))
+        y += 1
+    y += 1
+    label_width = max(len(label) for label, _ in fields) + 1
     for offset, (label, value) in enumerate(fields):
-        y = start_y + offset * 2
-        if y >= height - 2:
+        if y >= height - 1:
             break
         marker = ">" if offset == active_index else " "
-        row = f"{marker}{label}: {value}"
+        shown = f"< {value} >" if label == ENTRY_OPSEC else value
+        row = f"{marker}{label + ':':<{label_width}} {shown}"
         attr = (
             curses_module.A_BOLD if offset == active_index else curses_module.A_NORMAL
         )
         stdscr.addstr(y, 0, _ellipsize(row, width - 1), attr)
+        y += 1
     if message and height >= 2:
         stdscr.addstr(
             height - 1,
             0,
-            _curses_line_text(message, width - 1),
+            _curses_line_text(message, width - 1, band=True),
             (_pair_attr(curses_module, 15) if enable_color else curses_module.A_BOLD),
         )
     stdscr.refresh()
@@ -3515,33 +3885,52 @@ def _save_location_entry(
     observation: location_memory.LocationObservation,
     *,
     memory_path: Path,
+    record_id: str = "",
 ) -> str:
-    """Validate and save one local-memory editor form."""
+    """Validate and save one editor form; return an error message or "".
+
+    A wired form saves its LAN name too. When only the LAN is named, the
+    place takes the LAN's name.
+    """
 
     values = {label: value.strip() for label, value in fields}
-    label = values.get("Label", "")
-    fine_location = values.get("Fine location", "")
-    opsec_level = values.get("OPSEC", "")
-    threshold = _float_or_none(values.get("Threshold"))
-    if not label:
-        return "Label is required."
+    lan_name = values.get(ENTRY_LAN_NAME)
+    place = values.get(ENTRY_PLACE, "") or (lan_name or "")
+    opsec_level = values.get(ENTRY_OPSEC, "")
+    threshold = _float_or_none(values.get(ENTRY_THRESHOLD))
+    if not place:
+        return "Name the place (or the LAN) before saving."
     if not observation.wifi_bssid and not observation.gateway_macs:
-        return "No BSSID/router MAC captured; cannot save."
-    if opsec_level not in {"private-trusted", "private", "public", "unknown"}:
+        return "No access point or router captured; cannot save."
+    if opsec_level not in OPSEC_LEVELS:
         return "OPSEC must be private-trusted, private, public, or unknown."
     if threshold is None or threshold <= 0:
         return "Threshold must be a positive number."
     location_memory.learn_location_memory(
-        label,
-        fine_location=fine_location,
+        place,
+        fine_location=values.get(ENTRY_DETAIL, ""),
         opsec_level=opsec_level,
         confidence_threshold=threshold,
         observation=observation,
         memory_path=memory_path,
         salt_path=DEFAULT_LOCATION_MEMORY_SALT_PATH,
         include_geo=observation.network_estimate is not None,
+        lan_name=lan_name,
+        record_id=record_id or None,
     )
     return ""
+
+
+def _read_entry_key(stdscr: Any, curses_module: Any) -> Any:
+    """Read one key, preferring `get_wch` so non-ASCII names can be typed."""
+
+    get_wch = getattr(stdscr, "get_wch", None)
+    if get_wch is None:
+        return stdscr.getch()
+    try:
+        return get_wch()
+    except curses_module.error:
+        return -1
 
 
 def _run_location_entry_page(
@@ -3551,7 +3940,7 @@ def _run_location_entry_page(
     *,
     enable_color: bool,
 ) -> bool:
-    """Run the interactive local-memory editor page."""
+    """Run the interactive location-memory editor; return True after a save."""
 
     observation = observe_operator_location(
         geolocate=not args.no_geolocate,
@@ -3559,12 +3948,8 @@ def _run_location_entry_page(
     )
     memory_path = Path(args.location_memory)
     defaults = _location_entry_defaults(observation, memory_path=memory_path)
-    fields = [
-        ("Label", defaults.label),
-        ("Fine location", defaults.fine_location),
-        ("OPSEC", defaults.opsec_level),
-        ("Threshold", f"{defaults.confidence_threshold:g}"),
-    ]
+    title, rows = _location_entry_header(observation, defaults)
+    fields = _location_entry_fields(defaults, wired=observation.wired)
     active_index = 0
     message = ""
     stdscr.nodelay(False)
@@ -3573,37 +3958,31 @@ def _run_location_entry_page(
             _draw_location_entry_form(
                 stdscr,
                 curses_module,
+                title=title,
+                rows=rows,
                 fields=fields,
                 active_index=active_index,
                 message=message,
-                defaults=defaults,
-                observation=observation,
                 enable_color=enable_color,
             )
-            key = stdscr.getch()
-            if key in (27, ord("q"), ord("Q")):
+            key = _read_entry_key(stdscr, curses_module)
+            if key == getattr(curses_module, "KEY_RESIZE", None):
+                _adopt_terminal_resize(curses_module)
+                continue
+            fields, active_index, action = _apply_location_entry_key(
+                fields, active_index, key, curses_module
+            )
+            if action == ENTRY_CANCEL:
                 return False
-            if key in (curses_module.KEY_UP,):
-                active_index = (active_index - 1) % len(fields)
-                continue
-            if key in (curses_module.KEY_DOWN, 9):
-                active_index = (active_index + 1) % len(fields)
-                continue
-            if key in (curses_module.KEY_F2, 10, 13):
+            if action == ENTRY_SAVE:
                 message = _save_location_entry(
                     fields,
                     observation,
                     memory_path=memory_path,
+                    record_id=defaults.record_id,
                 )
                 if not message:
                     return True
-                continue
-            label, value = fields[active_index]
-            if key in (curses_module.KEY_BACKSPACE, 127, 8):
-                fields[active_index] = (label, value[:-1])
-                continue
-            if 32 <= key <= 126:
-                fields[active_index] = (label, value + chr(key))
     finally:
         stdscr.nodelay(True)
 
@@ -3792,12 +4171,21 @@ def _run_curses(args: argparse.Namespace) -> int:
                 height=height,
                 stale_seconds=args.stale_seconds,
             )
-            phase_slice_states = _phase_slice_line_states(status, width)
+            line_states = _phase_slice_line_states(status, width)
+            if operator_location is not None:
+                for identity_line in _operator_identity_lines(
+                    operator_location, max(20, width)
+                ):
+                    line_states[identity_line] = HOST_STATE
             stdscr.erase()
             for y, line in enumerate(lines[:height]):
                 if width <= 1:
                     continue
-                text = _curses_line_text(line, width - 1)
+                text = _curses_line_text(
+                    line,
+                    width - 1,
+                    band=line_states.get(line) == HOST_STATE,
+                )
                 stdscr.addstr(
                     y,
                     0,
@@ -3806,7 +4194,7 @@ def _run_curses(args: argparse.Namespace) -> int:
                         curses,
                         line,
                         enable_color,
-                        phase_slice_states.get(line),
+                        line_states.get(line),
                     ),
                 )
             stdscr.refresh()

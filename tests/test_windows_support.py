@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -264,7 +265,25 @@ def test_run_command_replaces_undecodable_output() -> None:
 
     assert result.returncode == 0
     assert result.stdout.endswith(" ok")
-    assert "\ufffd" in result.stdout
+
+
+def test_probe_output_prefers_utf8_then_oem_on_windows(monkeypatch) -> None:
+    assert ubersight._decode_probe_output("Caf\u00e9 Guest".encode()) == (
+        "Caf\u00e9 Guest"
+    )
+    assert ubersight._decode_probe_output(None) == ""
+    monkeypatch.setattr(ubersight, "_is_windows", lambda: False)
+    assert "\ufffd" in ubersight._decode_probe_output(b"\xff ok")
+
+
+@windows_only
+def test_probe_output_uses_oem_code_page_for_console_tools() -> None:
+    oem_bytes = b"Caf\x82 Guest"  # e-acute in the common OEM code pages
+
+    decoded = ubersight._decode_probe_output(oem_bytes)
+
+    assert decoded == oem_bytes.decode("oem")
+    assert "\ufffd" not in decoded
 
 
 def test_run_command_never_shares_terminal_stdin() -> None:
@@ -371,6 +390,282 @@ def test_git_status_probe_leaves_no_index_lock(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert lock.read_text(encoding="utf-8") == "held by another git command\n"
+
+
+# Network probes ------------------------------------------------------------
+# Synthetic command output uses documentation address ranges and example MACs.
+
+ROUTE_PRINT = """\
+===========================================================================
+Interface List
+  8...00 11 22 33 44 55 ......Example Ethernet
+  1...........................Software Loopback Interface 1
+===========================================================================
+
+IPv4 Route Table
+===========================================================================
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.0.2.1      192.0.2.50     25
+        127.0.0.0        255.0.0.0         On-link         127.0.0.1    331
+        127.0.0.1  255.255.255.255         On-link         127.0.0.1    331
+        192.0.2.0    255.255.255.0         On-link        192.0.2.50    281
+       192.0.2.50  255.255.255.255         On-link        192.0.2.50    281
+      192.0.2.255  255.255.255.255         On-link        192.0.2.50    281
+       100.64.0.0      255.192.0.0         On-link       100.100.1.2      5
+        224.0.0.0        240.0.0.0         On-link        192.0.2.50    281
+      169.254.0.0      255.255.0.0         On-link     169.254.10.20    281
+===========================================================================
+Persistent Routes:
+  None
+"""
+
+ROUTE_PRINT_GERMAN = """\
+IPv4-Routentabelle
+===========================================================================
+Aktive Routen:
+     Netzwerkziel    Netzwerkmaske          Gateway    Schnittstelle Metrik
+          0.0.0.0          0.0.0.0     198.51.100.1  198.51.100.20     35
+     198.51.100.0    255.255.255.0   Auf Verbindung  198.51.100.20    291
+"""
+
+ARP_OUTPUT = """
+Interface: 192.0.2.50 --- 0x8
+  Internet Address      Physical Address      Type
+  192.0.2.1             00-11-22-AA-BB-CC     dynamic
+  192.0.2.255           ff-ff-ff-ff-ff-ff     static
+"""
+
+NETSH_CONNECTED = """
+There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    Description            : Example Wireless Adapter
+    Physical address       : 00:11:22:33:44:55
+    State                  : connected
+    SSID                   : Example Cafe Guest
+    AP BSSID               : 66:77:88:99:AA:BB
+    Band                   : 5 GHz
+"""
+
+NETSH_DISCONNECTED = """
+There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    Description            : Example Wireless Adapter
+    Physical address       : 00:11:22:33:44:55
+    State                  : disconnected
+    Radio status           : Hardware On
+                             Software Off
+"""
+
+NETSH_LOCATION_WITHHELD = (
+    "Network shell commands need location permission to access WLAN "
+    "information. Turn on Location services on the Location page in Privacy "
+    "& security settings.\n"
+)
+
+
+def windows_probe_runner(netsh_output: str | None, route_output: str = ROUTE_PRINT):
+    """Fake `run_command` for a Windows host: Linux tools are missing."""
+
+    def run(args, *, cwd=None, timeout_seconds=10.0):
+        tool = args[0]
+        if tool == "route":
+            return ubersight.CommandResult(tuple(args), 0, route_output)
+        if tool == "arp":
+            return ubersight.CommandResult(tuple(args), 0, ARP_OUTPUT)
+        if tool == "netsh" and netsh_output is not None:
+            return ubersight.CommandResult(tuple(args), 0, netsh_output)
+        return ubersight.CommandResult(tuple(args), 127, "", "not found")
+
+    return run
+
+
+def test_windows_default_routes_and_subnets_parse_route_print() -> None:
+    assert ubersight._parse_windows_default_routes(ROUTE_PRINT) == (
+        ("192.0.2.50", "192.0.2.1"),
+    )
+    assert ubersight._parse_windows_local_subnets(ROUTE_PRINT, ["192.0.2.50"]) == (
+        "192.0.2.0/24",
+    )
+
+
+def test_windows_route_parsing_ignores_translated_on_link_text() -> None:
+    """German prints `Auf Verbindung`, which shifts left-anchored columns."""
+
+    assert ubersight._parse_windows_default_routes(ROUTE_PRINT_GERMAN) == (
+        ("198.51.100.20", "198.51.100.1"),
+    )
+    assert ubersight._parse_windows_local_subnets(
+        ROUTE_PRINT_GERMAN, ["198.51.100.20"]
+    ) == ("198.51.100.0/24",)
+
+
+def test_windows_probes_fall_back_when_linux_tools_are_missing() -> None:
+    run = windows_probe_runner(NETSH_DISCONNECTED)
+
+    assert ubersight._default_gateway_routes(run) == (("192.0.2.50", "192.0.2.1"),)
+    assert ubersight._default_gateway_macs(run) == ("00:11:22:aa:bb:cc",)
+    assert ubersight._local_ipv4_subnets(run) == ("192.0.2.0/24",)
+
+
+def test_mac_normalization_accepts_dashes_but_not_mixed_separators() -> None:
+    assert ubersight._normalized_mac("00-11-22-AA-BB-CC dynamic") == (
+        "00:11:22:aa:bb:cc"
+    )
+    assert ubersight._normalized_mac("lladdr 00:11:22:aa:bb:cc") == (
+        "00:11:22:aa:bb:cc"
+    )
+    assert ubersight._normalized_mac("00-11:22-aa:bb-cc") == ""
+
+
+def test_netsh_parsing_reads_ssid_and_bssid_not_adapter_address() -> None:
+    assert ubersight._parse_netsh_ssid(NETSH_CONNECTED) == "Example Cafe Guest"
+    assert ubersight._parse_netsh_bssid(NETSH_CONNECTED) == "66:77:88:99:aa:bb"
+    assert ubersight._parse_netsh_ssid(NETSH_DISCONNECTED) == "unknown"
+    assert ubersight._parse_netsh_bssid(NETSH_DISCONNECTED) == ""
+    assert ubersight._parse_netsh_bssid("    BSSID : 0a:0b:0c:0d:0e:0f\n") == (
+        "0a:0b:0c:0d:0e:0f"
+    )
+
+
+def test_wired_observation_uses_router_identity() -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=windows_probe_runner(NETSH_DISCONNECTED), geolocate=False
+    )
+
+    assert observation.wifi_ssid == "unknown"
+    assert observation.gateway_macs == ("00:11:22:aa:bb:cc",)
+    assert observation.local_subnets == ("192.0.2.0/24",)
+    assert observation.wired is True
+
+
+@pytest.mark.parametrize(
+    "netsh_output",
+    [NETSH_LOCATION_WITHHELD, None],
+    ids=["location-withheld", "netsh-missing"],
+)
+def test_unproven_wifi_state_is_never_called_wired(netsh_output) -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=windows_probe_runner(netsh_output), geolocate=False
+    )
+
+    assert observation.wifi_ssid == "unknown"
+    assert observation.gateway_macs == ("00:11:22:aa:bb:cc",)
+    assert observation.wired is False
+
+
+def test_windows_wifi_observation_reads_netsh() -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=windows_probe_runner(NETSH_CONNECTED), geolocate=False
+    )
+
+    assert observation.wifi_ssid == "Example Cafe Guest"
+    assert observation.wifi_bssid == "66:77:88:99:aa:bb"
+    assert observation.wired is False
+
+
+def test_wired_status_round_trips_through_cache_and_display(tmp_path: Path) -> None:
+    status = ubersight.OperatorLocationStatus(
+        hostname="example-host",
+        username="operator",
+        wifi_ssid="unknown",
+        location="Example City",
+        wired=True,
+    )
+    cache = tmp_path / "location-cache.json"
+
+    ubersight._write_location_cache(cache, status)
+    loaded = ubersight._load_location_cache(cache)
+
+    assert loaded is not None and loaded.wired is True
+    assert ubersight._network_display_segment(loaded) == "Ethernet (unknown LAN)"
+    assert (
+        ubersight._network_display_segment(
+            ubersight.OperatorLocationStatus("h", "u", "unknown", "x")
+        )
+        == "WIFI: unknown"
+    )
+    assert (
+        ubersight._network_display_segment(
+            ubersight.OperatorLocationStatus("h", "u", "Example Cafe Guest", "x")
+        )
+        == "WIFI: Example Cafe Guest"
+    )
+
+
+def test_named_wired_lan_shows_its_location_memory_label(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A LAN named in the location editor appears as `Ethernet (<label>)`."""
+
+    # Keep the default salt path inside the test's own directory.
+    monkeypatch.chdir(tmp_path)
+    observation = ubersight.observe_operator_location(
+        run_command=windows_probe_runner(NETSH_DISCONNECTED), geolocate=False
+    )
+    match = ubersight.location_memory.LocationMemoryMatch(
+        record={
+            "label": "Home office",
+            "lan_name": "Example Wired LAN",
+            "display": {"coarse": "Home office"},
+        },
+        score=100.0,
+        threshold=80.0,
+        reasons=("gateway",),
+    )
+
+    status = ubersight._status_from_location_memory_match(
+        observation, match, ubersight._local_now()
+    )
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(cache, status)
+    loaded = ubersight._load_location_cache(cache)
+
+    assert loaded is not None
+    assert loaded.network_label == "Example Wired LAN"
+    assert ubersight._network_display_segment(loaded) == "Ethernet (Example Wired LAN)"
+    footer = " ".join(
+        ubersight._operator_footer_lines(loaded, 80, max_lines_per_status=3)
+    )
+    assert "Ethernet (Example Wired LAN)" in footer
+    assert "WIFI:" not in footer
+
+
+def test_wired_networks_refresh_instead_of_reusing_stale_cache(
+    tmp_path: Path,
+) -> None:
+    """On a cable an unknown SSID is normal, not a failed WiFi probe."""
+
+    now = ubersight._local_now()
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(
+        cache,
+        ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="unknown",
+            location="Example City",
+            updated_at=now - timedelta(seconds=60),
+            network_observed_at=now - timedelta(seconds=120),
+        ),
+    )
+
+    status = ubersight.load_or_refresh_operator_location(
+        cache,
+        now=now,
+        network_max_age_seconds=30,
+        run_command=windows_probe_runner(NETSH_DISCONNECTED),
+        geolocate=False,
+        memory_path=tmp_path / "memory.json",
+        network_profiles_path=tmp_path / "profiles.json",
+        observation_log_path=tmp_path / "observations.jsonl",
+    )
+
+    assert status.wired is True
+    assert status.location == "Example City"
+    assert status.network_observed_at == now
 
 
 # Process identity ----------------------------------------------------------

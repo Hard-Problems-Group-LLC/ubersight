@@ -101,7 +101,8 @@ def test_render_defaults_fit_40_by_40() -> None:
     assert any(line.startswith(">Slice 2") for line in lines)
     assert any("Workers" == line for line in lines)
     assert sum(line.strip().startswith("OPSEC:") for line in lines[-9:]) >= 2
-    assert any(line.startswith("HOST: diogenes") for line in lines[-9:])
+    assert "mheck@diogenes" in lines[-9:]
+    assert "WIFI: FixtureNet" in lines[-9:]
     assert any(line.startswith("LOC: Example City") for line in lines[-9:])
     assert len(lines) <= 40
     assert all(len(line) <= 40 for line in lines)
@@ -1358,9 +1359,12 @@ def test_footer_status_blocks_can_expand_to_three_lines() -> None:
     )
 
     footer = lines[-9:]
-    assert any(line.strip().startswith("OPSEC:") for line in footer[:3])
-    assert any(line.startswith("HOST:") for line in footer[3:6])
-    assert any(line.startswith("LOC:") for line in footer[6:])
+    opsec = [i for i, line in enumerate(footer) if line.startswith("OPSEC:")]
+    identity = footer.index("operator@very-long-hostname")
+    loc = [i for i, line in enumerate(footer) if line.startswith("LOC:")]
+    assert len(opsec) == 3 and max(opsec) < identity
+    assert footer[identity + 1] == "WIFI: Long Wireless Network Name"
+    assert loc and min(loc) == identity + 2
     assert all(len(line) <= 32 for line in footer)
 
 
@@ -1394,9 +1398,7 @@ def test_tailscale_footer_renders_below_opsec() -> None:
         for index, line in enumerate(lines)
         if line.strip().startswith("Tailscale:")
     )
-    host_index = next(
-        index for index, line in enumerate(lines) if line.startswith("HOST:")
-    )
+    host_index = lines.index("mheck@diogenes")
     assert opsec_index < tailscale_index < host_index
     assert lines[tailscale_index].startswith("Tailscale:")
     assert "alpha-bravo UP" in lines[tailscale_index]
@@ -1523,8 +1525,8 @@ def test_colored_header_and_footer_lines_paint_full_width() -> None:
     assert ubersight._curses_line_text("(R)efresh  (E)nter", 30) == (
         "(R)efresh  (E)nter".ljust(30)
     )
-    assert ubersight._curses_line_text("HOST: diogenes", 30) == (
-        "HOST: diogenes".ljust(30)
+    assert ubersight._curses_line_text("mheck@diogenes", 30, band=True) == (
+        "mheck@diogenes".ljust(30)
     )
     assert ubersight._curses_line_text("PROJECT: UBERSIGHT", 30) == (
         "PROJECT: UBERSIGHT"
@@ -1598,6 +1600,42 @@ def test_only_the_public_opsec_alarm_centers_its_first_row() -> None:
 
     assert all(line.startswith("OPSEC: ") for line in routine)
     assert public[0].startswith(" ") and public[0].strip().startswith("OPSEC!: ")
+
+
+def test_identity_rows_show_user_at_host_then_network() -> None:
+    wifi = ubersight.OperatorLocationStatus("diogenes", "mheck", "FixtureNet", "x")
+    wired = ubersight.OperatorLocationStatus(
+        "diogenes", "mheck", "unknown", "x", wired=True, network_label="Example Wired LAN"
+    )
+
+    assert ubersight._operator_identity_lines(wifi, 40) == (
+        "mheck@diogenes",
+        "WIFI: FixtureNet",
+    )
+    assert ubersight._operator_identity_lines(wired, 40) == (
+        "mheck@diogenes",
+        "Ethernet (Example Wired LAN)",
+    )
+    assert ubersight._operator_identity_lines(wired, 10)[0] == "mheck@d..."
+
+
+def test_identity_rows_are_styled_from_data_not_text() -> None:
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    assert ubersight._curses_attr_for_line(
+        FakeCurses, "mheck@diogenes", True, ubersight.HOST_STATE
+    ) == FakeCurses.color_pair(10)
+    assert (
+        ubersight._curses_attr_for_line(FakeCurses, "mheck@diogenes", True)
+        == FakeCurses.A_NORMAL
+    )
+    assert ubersight._curses_line_text("mheck@diogenes", 20) == "mheck@diogenes"
 
 
 def test_tailscale_status_colors_reflect_state() -> None:
