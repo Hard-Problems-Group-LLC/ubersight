@@ -52,6 +52,7 @@ dev = [
 
 [project.scripts]
 ubersight = "ubersight.dashboard:main"
+ubersight-autosplit = "ubersight.autosplit:main"
 ubersight-location-memory = "ubersight.operator_location_memory:main"
 ubersight-probe-location = "ubersight.probe_operator_location:main"
 ubersight-stop = "ubersight.stop_ubersight:main"

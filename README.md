@@ -24,6 +24,9 @@ developer tools, installs managed Git hooks when available, and publishes the
 console commands:
 
 - `ubersight`
+- `ubersight-autosplit`: split the current terminal into an agent pane, a
+  console, and a full-height Ubersight pane (see
+  `docs/scripts/ubersight-autosplit.md`)
 - `ubersight-location-memory`
 - `ubersight-probe-location`
 - `ubersight-stop`
