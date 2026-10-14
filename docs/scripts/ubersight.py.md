@@ -556,9 +556,12 @@ terminal-library port.
 
 ```powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\ubersight
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\ubersight
 ```
+
+Keep the leading `.\`. Without it, PowerShell reads
+`.venv\Scripts\ubersight` as a command inside a module named `.venv`.
 
 To open it as a narrow side pane in the current Windows Terminal window:
 

@@ -92,9 +92,12 @@ while the managed installer gains Windows support:
 
 ```powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\ubersight
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\ubersight
 ```
+
+In PowerShell, keep the leading `.\`. Without it, PowerShell reads
+`.venv\Scripts\ubersight` as a command inside a module named `.venv`.
 
 On Windows, `windows-curses` is installed automatically as a
 platform-specific dependency. Background-job status lives under the
