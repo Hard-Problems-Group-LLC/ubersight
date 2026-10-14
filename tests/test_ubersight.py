@@ -1503,8 +1503,10 @@ def test_colored_header_and_footer_lines_paint_full_width() -> None:
     assert ubersight._curses_line_text("WORK: SAFE, SYNCED", 30) == (
         "WORK: SAFE, SYNCED".ljust(30)
     )
+    # Routine OPSEC notes are colored text without a band; only the
+    # public-network alarm paints across the pane.
     assert ubersight._curses_line_text("OPSEC: LOCAL STATUS", 30) == (
-        "OPSEC: LOCAL STATUS".ljust(30)
+        "OPSEC: LOCAL STATUS"
     )
     assert ubersight._curses_line_text("OPSEC!: PUBLIC NETWORK", 30) == (
         "OPSEC!: PUBLIC NETWORK".ljust(30)
@@ -1541,6 +1543,25 @@ def test_public_opsec_uses_white_on_red() -> None:
     assert ubersight._curses_attr_for_line(
         FakeCurses, "OPSEC!: PUBLIC NETWORK", True
     ) == (FakeCurses.color_pair(7) | FakeCurses.A_BOLD)
+
+
+def test_routine_opsec_is_text_only_while_public_alarm_keeps_its_band() -> None:
+    """Routine OPSEC notes use colored text; only the alarm paints a band."""
+
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    assert ubersight._curses_attr_for_line(
+        FakeCurses, "OPSEC: LOCAL STATUS / LOCATION ESTIMATE;", True
+    ) == (FakeCurses.color_pair(12) | FakeCurses.A_BOLD)
+    assert not ubersight._line_uses_full_width_background("OPSEC: LOCAL STATUS")
+    assert ubersight._line_uses_full_width_background("OPSEC!: PUBLIC NETWORK")
+    assert ubersight._curses_line_text("OPSEC: short", 20) == "OPSEC: short"
 
 
 def test_tailscale_status_colors_reflect_state() -> None:

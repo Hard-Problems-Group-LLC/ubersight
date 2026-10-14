@@ -3350,7 +3350,6 @@ def _line_uses_full_width_background(line: str) -> bool:
             "WORK: CHECK",
         }
         or stripped.startswith("OPSEC!:")
-        or stripped.startswith("OPSEC:")
         or stripped.startswith("Tailscale:")
         or stripped.startswith("DATA")
         or stripped.startswith("(R)efresh")
@@ -3711,7 +3710,9 @@ def _run_curses(args: argparse.Namespace) -> int:
             curses.init_pair(9, curses.COLOR_YELLOW, curses.COLOR_BLACK)
             curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
             curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_BLUE)
-            curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_MAGENTA)
+            # Routine OPSEC notes are informational: magenta text on the
+            # pane background. Only the public-network alarm gets a band.
+            curses.init_pair(12, curses.COLOR_MAGENTA, -1)
             curses.init_pair(13, curses.COLOR_BLUE, curses.COLOR_YELLOW)
             curses.init_pair(14, curses.COLOR_BLACK, curses.COLOR_GREEN)
             curses.init_pair(15, curses.COLOR_BLACK, curses.COLOR_YELLOW)
