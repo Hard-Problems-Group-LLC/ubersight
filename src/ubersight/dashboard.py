@@ -330,6 +330,10 @@ def _run_command(
 
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    # Read-only probes such as `git status` otherwise take `.git/index.lock`
+    # to refresh cached file stats. Polling every second, that makes the
+    # operator's own `git add` or commit fail at random with a lock error.
+    env.setdefault("GIT_OPTIONAL_LOCKS", "0")
     # Only fetches reach a remote, so only they pay for the extra
     # `git config` lookup that preserves a configured SSH client.
     if tuple(args[:2]) == ("git", "fetch"):

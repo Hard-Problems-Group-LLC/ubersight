@@ -385,7 +385,9 @@ operation blocks. By default, refresh runs `git fetch --quiet origin` before
 comparing the current branch with its upstream. Git subprocesses disable
 terminal prompts and use SSH batch mode with a short connect timeout, so a
 hostile or captive network should degrade to `WORK: CHECK GIT` instead of
-blocking the side-window display.
+blocking the side-window display. They also run with `GIT_OPTIONAL_LOCKS=0`,
+so the dashboard's frequent `git status` checks never hold `.git/index.lock`
+while the operator or an agent stages or commits.
 
 Location status separates cheap local network observation from public
 geolocation. By default, local hostname, username, WiFi SSID, and related
