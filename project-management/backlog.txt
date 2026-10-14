@@ -20,6 +20,9 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   2026-10-14T00:24:00-07:00 - Slice 15 landed the Windows install path
   and removed the two `tests/test_install_scope.py` skips; 15 remain in
   `tests/test_bootstrap.py`.
+  2026-10-14T00:44:00-07:00 - Slice 13 landed the cross-platform stop
+  and restart workflow (`ubersight --supervise` and a Windows-capable
+  `ubersight-stop`). Slices 14 and 16 remain.
 
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own

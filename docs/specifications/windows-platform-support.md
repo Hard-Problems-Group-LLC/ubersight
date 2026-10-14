@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: In progress (Slices 11, 12, and 15 implemented)  
+Status: In progress (Slices 11, 12, 13, and 15 implemented)  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -117,6 +117,70 @@ If `ctypes` inspection proves fragile or too limited, for example when
 full command lines are needed, the approved fallback is to add
 `psutil; sys_platform == "win32"` behind the same internal interface.
 
+## Slice 13: Stop and Restart
+
+### Restart requests
+
+A live dashboard accepts a restart request. It then leaves curses through
+its normal cleanup and exits with status 75.
+
+- **Windows:** each dashboard creates a manual-reset named event,
+  `Local\ubersight-dashboard-restart-<pid>`, and checks it while waiting
+  for keys. Named objects in `Local\` belong to the logon session, so a
+  sandboxed agent session can reach the operator's dashboards even though
+  its `%LOCALAPPDATA%` is separate.
+- **POSIX:** the dashboard catches `SIGTERM` and treats it as a restart
+  request.
+- **Response time:** a request takes effect within about 50 ms while the
+  dashboard waits for keys. During a long probe, such as a slow `git
+  fetch`, it takes effect when the probe finishes, and while the location
+  editor is open, when the editor closes.
+- **Ctrl+C:** the dashboard exits with status 130, without a traceback.
+
+### `ubersight --supervise`
+
+`--supervise` runs the dashboard, with the same arguments minus
+`--supervise`, as a child process in a loop. The child shares the terminal.
+What happens next depends on how the child exits:
+
+| Child exit | Supervisor action |
+| --- | --- |
+| Status 75 (restart request) | Restart immediately |
+| Status 0 (the operator pressed Q) | Exit with status 0 |
+| Ctrl+C (`KeyboardInterrupt`, status 130, or Windows `STATUS_CONTROL_C_EXIT`) | Exit with status 130 |
+| Any other status, including a crash or a forced stop | Print a message and restart after one second |
+
+`--supervise` cannot be combined with `--once` or `--write-status`. It
+replaces `scripts/ubersight_wrapper.sh` on every platform. The wrapper
+remains for existing POSIX setups and still restarts after any exit,
+including Q.
+
+### `ubersight-stop`
+
+- **Finding dashboards:**
+  - On Windows, it walks a process snapshot and opens each process's
+    restart event; only dashboards create one.
+  - On POSIX, it keeps the `/proc` scan of same-user processes whose
+    command names `ubersight` or `ubersight.py`.
+  - Supervisor processes and the helper itself are never matched.
+- **Default action:** it sends restart requests, then waits up to
+  `--wait-seconds` (default 5) for each matched dashboard to exit. It exits
+  with status 0 when every dashboard exited, and status 1 when some are
+  still running.
+- **`--dry-run`:** lists matches only.
+- **`--force`:** after the wait, ends remaining dashboards:
+  `TerminateProcess` on Windows, `SIGKILL` on POSIX. It acts only while the
+  process's recorded creation time still matches, so a reused PID is
+  never killed. A supervised dashboard ended this way is restarted by its
+  supervisor.
+- **Old code:** dashboards started from code older than Slice 13 create
+  no restart event, so `ubersight-stop` cannot find them on Windows.
+
+### Autosplit
+
+Once Phase 12 merges this slice, `ubersight-autosplit` starts its dashboard
+pane with `--supervise`.
+
 ## Slice 15: Install Path
 
 ### Stage one
@@ -185,7 +249,6 @@ installer refuses such a home unless `--user-home` or
 
 These slices get their own requirements when they start:
 
-- 13: stop and restart workflow
 - 14: network and location probes
 - 16: test-suite parity
 

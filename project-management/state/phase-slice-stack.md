@@ -36,7 +36,7 @@ Active phase slices:
 
 * Slice 11: Fix Windows runtime blockers, active.
 * Slice 12: Add Windows process identity, planned.
-* Slice 13: Port stop and restart workflow, planned.
+* Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, planned.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, planned.
