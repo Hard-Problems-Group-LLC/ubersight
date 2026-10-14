@@ -17,6 +17,9 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   operator. Requestor: operator. No active blocker.
   Slice 16 must remove the temporary `POSIX_INSTALLER_ONLY` Windows skips
   in `tests/test_bootstrap.py` and `tests/test_install_scope.py`.
+  2026-10-14T00:24:00-07:00 - Slice 15 landed the Windows install path
+  and removed the two `tests/test_install_scope.py` skips; 15 remain in
+  `tests/test_bootstrap.py`.
 
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own

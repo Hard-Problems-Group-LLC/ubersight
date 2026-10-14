@@ -156,6 +156,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Bypass the stage-1 guard for explicit debugging.",
     )
     parser.add_argument(
+        "--no-modify-path",
+        action="store_true",
+        help=(
+            "On Windows, do not add the launcher directory to the user PATH "
+            "when it is missing; print instructions instead."
+        ),
+    )
+    parser.add_argument(
         "--rebuild-broken-pyenv",
         action="store_true",
         help=(
@@ -175,16 +183,27 @@ def ensure_started_by_stage_1(force_direct_run: bool) -> None:
     if os.environ.get(STAGE1_MARKER) == "1":
         return
     raise RuntimeError(
-        "scripts/install-stage-2.py must be started by ./install.sh. "
-        "Use ./install.sh, or rerun with --force-direct-run when you are "
-        "intentionally bypassing stage 1."
+        "scripts/install-stage-2.py must be started by ./install.sh "
+        "(install.ps1 on Windows). Use the stage-one installer, or rerun with "
+        "--force-direct-run when you are intentionally bypassing stage 1."
     )
+
+
+def is_windows() -> bool:
+    """Return whether stage two is running on native Windows."""
+
+    return os.name == "nt"
 
 
 def install_scope(args: argparse.Namespace) -> str:
     """Return the effective install scope for the selected mode."""
 
     if args.system:
+        if is_windows():
+            raise RuntimeError(
+                "--system is not supported on Windows. The default user "
+                "install publishes launchers to ~\\.local\\bin instead."
+            )
         if args.user_home is not None or args.allow_isolated_home:
             raise RuntimeError(
                 "--user-home and --allow-isolated-home are not valid with " "--system."
@@ -327,7 +346,34 @@ def ensure_repo_venv(runtime_python: Path) -> Path:
         ],
         cwd=REPO_ROOT,
     )
-    return REPO_ROOT / ".venv" / "bin" / "python"
+    return venv_python_path(REPO_ROOT / ".venv")
+
+
+def windows_repo_runtime_python() -> Path:
+    """Return the interpreter that builds the repository venv on Windows.
+
+    Windows has no pyenv source-build toolchain here. install.ps1 already
+    chose the pinned runtime when the `py` launcher has it, or the newest
+    Python otherwise. That interpreter must still meet the configured
+    runtime floor, and a version other than the pinned one is reported.
+    """
+
+    config = load_python_environment_config(REPO_ROOT)
+    ensure_minimum_python(
+        sys.version_info[:3],
+        config.runtime.required_version,
+        "A Windows development install",
+    )
+    current = ".".join(str(part) for part in sys.version_info[:3])
+    if current != config.runtime.base_version:
+        print(
+            "[install-stage-2] Using Python {} for the repository venv; the "
+            "pinned runtime {} is not installed.".format(
+                current, config.runtime.base_version
+            ),
+            flush=True,
+        )
+    return Path(sys.executable).resolve()
 
 
 def venv_python_path(venv_path: Path) -> Path:
@@ -497,6 +543,145 @@ def launcher_dir_for_scope(scope: str, user_home: Optional[Path] = None) -> Path
     return default_user_bin_dir(user_home)
 
 
+def normalized_path_entry(entry: str) -> str:
+    """Return one PATH entry normalized for comparison on this platform."""
+
+    expanded = os.path.expandvars(os.path.expanduser(entry.strip().strip('"')))
+    if not expanded:
+        return ""
+    return os.path.normcase(os.path.normpath(expanded))
+
+
+def path_value_contains(
+    path_value: str, directory: Path, separator: str = os.pathsep
+) -> bool:
+    """Return whether a PATH-style value already lists `directory`."""
+
+    target = normalized_path_entry(str(directory))
+    return any(
+        normalized_path_entry(entry) == target
+        for entry in path_value.split(separator)
+        if entry.strip()
+    )
+
+
+def append_path_entry(
+    path_value: str, directory: Path, separator: str = os.pathsep
+) -> str:
+    """Return a PATH-style value with `directory` appended once."""
+
+    stripped = path_value.rstrip(separator)
+    return (
+        "{}{}{}".format(stripped, separator, directory) if stripped else str(directory)
+    )
+
+
+class WindowsUserPath:
+    """Read and update the per-user PATH stored in `HKCU\\Environment`.
+
+    The value keeps its registry type, so `REG_EXPAND_SZ` entries such as
+    `%USERPROFILE%\\bin` continue to expand. After a change, running programs
+    are told to reload the environment, so new terminals see it at once.
+    """
+
+    def read(self) -> Tuple[str, int]:
+        """Return the user PATH value and its registry type."""
+
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            try:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                return "", winreg.REG_EXPAND_SZ
+        return str(value), kind
+
+    def write(self, value: str, kind: int) -> None:
+        """Store a new user PATH value with the given registry type."""
+
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, "Path", 0, kind, value)
+
+    def broadcast(self) -> None:
+        """Notify running programs that environment settings changed."""
+
+        import ctypes
+
+        hwnd_broadcast = 0xFFFF
+        wm_settingchange = 0x001A
+        smto_abortifhung = 0x0002
+        send = ctypes.windll.user32.SendMessageTimeoutW
+        send.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_size_t,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        result = ctypes.c_size_t()
+        send(
+            hwnd_broadcast,
+            wm_settingchange,
+            0,
+            "Environment",
+            smto_abortifhung,
+            5000,
+            ctypes.byref(result),
+        )
+
+
+def ensure_launcher_dir_on_path(
+    bin_dir: Path,
+    *,
+    modify: bool,
+    user_path: Optional[WindowsUserPath] = None,
+) -> str:
+    """Make the launcher directory reachable from new terminals, or explain how.
+
+    Windows appends a missing directory to the user PATH unless `modify` is
+    false. It never adds a directory inside this checkout, such as an
+    isolated AI home, so a sandboxed install cannot leak into the real
+    environment. POSIX hosts only report a missing directory.
+    """
+
+    if not is_windows():
+        if path_value_contains(os.environ.get("PATH", ""), bin_dir):
+            return "Launcher directory is on PATH: {}".format(bin_dir)
+        return (
+            "Launcher directory is not on PATH: {0}. Add it in your shell "
+            'profile, for example: export PATH="{0}:$PATH"'.format(bin_dir)
+        )
+    registry = user_path or WindowsUserPath()
+    value, kind = registry.read()
+    if path_value_contains(value, bin_dir, ";"):
+        return "Launcher directory is on the user PATH: {}".format(bin_dir)
+    resolved = bin_dir.expanduser().resolve()
+    root = REPO_ROOT.resolve()
+    if resolved == root or root in resolved.parents:
+        return (
+            "Launcher directory {} is inside this checkout; not adding it to "
+            "the user PATH.".format(bin_dir)
+        )
+    if not modify:
+        return (
+            "Launcher directory is not on the user PATH: {}. Rerun without "
+            "--no-modify-path, or add it in the Environment Variables dialog "
+            "(rundll32.exe sysdm.cpl,EditEnvironmentVariables).".format(bin_dir)
+        )
+    registry.write(append_path_entry(value, bin_dir, ";"), kind)
+    registry.broadcast()
+    return (
+        "Added {} to the user PATH; open a new terminal to use the "
+        "commands.".format(bin_dir)
+    )
+
+
 def run_project_install_hook(
     venv_python: Path,
     mode: str,
@@ -574,6 +759,35 @@ def install_git_hooks(venv_python: Path) -> None:
                 command.extend(["--repo-root", str(REPO_ROOT)])
             run(command, cwd=REPO_ROOT)
             return
+
+
+MANAGED_GIT_HOOKS = ("pre-commit", "pre-push")
+
+
+def normalize_git_hook_line_endings(
+    hooks_dir: Optional[Path] = None,
+) -> Tuple[Path, ...]:
+    """Convert managed hook wrappers to LF line endings.
+
+    The shared hook installer writes its bash wrappers in text mode, which
+    produces CRLF on Windows. Git's bash then rejects `set -euo pipefail\\r`,
+    so every commit would fail. Only the managed hook names are touched.
+    """
+
+    directory = hooks_dir or (REPO_ROOT / ".git" / "hooks")
+    if not directory.is_dir():
+        return ()
+    converted = []
+    for name in MANAGED_GIT_HOOKS:
+        hook = directory / name
+        try:
+            data = hook.read_bytes()
+        except OSError:
+            continue
+        if b"\r\n" in data:
+            hook.write_bytes(data.replace(b"\r\n", b"\n"))
+            converted.append(hook)
+    return tuple(converted)
 
 
 def ensure_direnv(auto_install: bool, user_home: Path) -> Path:
@@ -792,6 +1006,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     target_user_home = None
     direnv_path = None
     envrc_path = None
+    path_status = None
+    notes = []
     try:
         ensure_started_by_stage_1(args.force_direct_run)
         scope = install_scope(args)
@@ -804,12 +1020,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         launcher_bin_dir = launcher_dir_for_scope(scope, target_user_home)
         ensure_submodules(args.skip_submodule_init)
         if scope == REPO_SCOPE:
-            pyenv_root_path, runtime_selection, runtime_python = (
-                ensure_runtime_contexts(
-                    target_user_home,
-                    rebuild_broken_pyenv=args.rebuild_broken_pyenv,
+            if is_windows():
+                runtime_python = windows_repo_runtime_python()
+            else:
+                pyenv_root_path, runtime_selection, runtime_python = (
+                    ensure_runtime_contexts(
+                        target_user_home,
+                        rebuild_broken_pyenv=args.rebuild_broken_pyenv,
+                    )
                 )
-            )
             venv_python = ensure_repo_venv(runtime_python)
             install_venv = REPO_ROOT / ".venv"
             install_project(
@@ -820,9 +1039,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 launcher_bin_dir,
             )
             install_git_hooks(venv_python)
-            if not args.skip_shell_init_update:
+            if is_windows():
+                normalize_git_hook_line_endings()
+                # pyenv, direnv, and the bash/zsh shell-init blocks have no
+                # native Windows counterpart in this installer.
+                notes.append(
+                    "Skipped pyenv, direnv, and shell-init setup on Windows. "
+                    "Activate the venv with .\\.venv\\Scripts\\Activate.ps1."
+                )
+            elif not args.skip_shell_init_update:
                 ensure_shell_init(args.mode, target_user_home)
-            if args.mode == "dev":
+            if args.mode == "dev" and not is_windows():
                 direnv_path = ensure_direnv(
                     auto_install=not args.skip_direnv_install,
                     user_home=target_user_home,
@@ -845,6 +1072,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 launcher_bin_dir,
             )
         verify_install(venv_python)
+        if args.mode != "venv-only":
+            path_status = ensure_launcher_dir_on_path(
+                launcher_bin_dir, modify=not args.no_modify_path
+            )
     except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
         print("[install-stage-2] FAIL: {}".format(error), file=sys.stderr)
         return 1
@@ -871,6 +1102,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("Direnv: {}".format(direnv_path))
     if envrc_path is not None:
         print("Envrc: {}".format(envrc_path))
+    if path_status is not None:
+        print(path_status)
+    for note in notes:
+        print("Note: {}".format(note))
     if args.mode == "dev":
         print("Next step: open a new shell in this repository.")
     return 0

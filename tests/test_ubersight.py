@@ -1790,6 +1790,7 @@ def test_project_install_manages_all_console_launchers(tmp_path: Path) -> None:
         mode="standard",
         venv_path=venv_path,
         bin_dir=bin_dir,
+        copy_launchers=False,
     )
 
     assert {launcher.name for launcher in launchers} == set(project_install.COMMANDS)
@@ -1805,6 +1806,7 @@ def test_project_install_manages_all_console_launchers(tmp_path: Path) -> None:
             mode="venv-only",
             venv_path=venv_path,
             bin_dir=bin_dir,
+            copy_launchers=False,
         )
         == ()
     )
