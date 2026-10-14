@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: In progress (Slices 11 through 15 implemented)  
+Status: Implemented (Slices 11 through 16); Linux test run pending  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -298,17 +298,24 @@ also redirects `USERPROFILE`, `APPDATA`, and `LOCALAPPDATA` on Windows. The
 installer refuses such a home unless `--user-home` or
 `--allow-isolated-home` is given.
 
-## Later Slices
+## Slice 16: Test Parity
 
-These slices get their own requirements when they start:
+The whole suite runs on Windows. An installer test is skipped there only
+when the behavior it covers never runs on Windows, and its skip reason says
+so permanently:
 
-- 16: test-suite parity
+- `POSIX_PYENV_ONLY` covers nine tests: pyenv checkout reuse, runtime
+  contexts, curses-header preflights, broken-runtime repair, transactional
+  rebuilds, and the pyenv interpreter integrity probe. The Windows stage
+  two never builds or repairs a pyenv runtime; it uses the interpreter
+  `install.ps1` selected.
+- `POSIX_SHELL_ONLY` covers one test, `install_prerequisites.sh`. Windows
+  needs no native curses build prerequisites, because `windows-curses`
+  ships prebuilt wheels.
 
-Until Slice 16 lands, 15 installer tests in `tests/test_bootstrap.py`
-are marked `POSIX_INSTALLER_ONLY` and skipped on Windows with an
-explicit reason. They still run on POSIX hosts. Slice 16 must remove
-those skips. Slice 15 already removed the two `tests/test_install_scope.py`
-skips.
+Tests of behavior that does run on Windows use platform-correct fixtures
+instead of POSIX path literals. Those cover the development command log,
+the standard install virtual environment, and Git hook installation.
 
 ## Follow-Ups Outside This Repository
 

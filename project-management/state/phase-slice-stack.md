@@ -23,7 +23,7 @@ Recent phases:
 
 Active phase:
 
-* Phase 11: Native Windows support, active.
+* Phase 11: Native Windows support, done.
 
 Upcoming phases:
 
@@ -39,7 +39,7 @@ Active phase slices:
 * Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
-* Slice 16: Reach Windows test parity, planned.
+* Slice 16: Reach Windows test parity, done.
 
 ## Current Work
 
@@ -54,8 +54,10 @@ Done:
   redesigned location editor.
 - Slice 15: `install.ps1` and the Windows stage two.
 
-Remaining:
-- Slice 16: removing the last 15 Windows test skips.
+- Slice 16: Windows test parity; the remaining skips are permanent
+  POSIX-only cases with explicit reasons.
+
+Remaining before `trunk`: the operator's Linux test run.
 
 Phase 12 (`ubersight-autosplit`) builds on this branch from
 `feature/ubersight-autosplit`. The Expletives terminal-library port and the
