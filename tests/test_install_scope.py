@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from ubersight.install_scope import (
     CODEX_HOME_DIRNAME,
     default_pyenv_root,
@@ -5,6 +9,14 @@ from ubersight.install_scope import (
     default_user_bin_dir,
     describe_user_home_source,
     resolve_user_home,
+)
+
+# Native Windows installer support is roadmap Slices 15-16. Until it lands,
+# these tests exercise POSIX-only installer behavior such as pyenv `bin/`
+# layouts, executable shell scripts, and `HOME`-driven home selection.
+POSIX_INSTALLER_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX installer path; Windows installer support is Slices 15-16",
 )
 
 
@@ -19,6 +31,7 @@ def test_default_user_paths_follow_selected_home(tmp_path):
     assert default_pyenv_root(user_home) == user_home / ".pyenv"
 
 
+@POSIX_INSTALLER_ONLY
 def test_resolve_user_home_rejects_repo_local_codex_home_by_default(
     tmp_path,
     monkeypatch,
@@ -62,6 +75,7 @@ def test_resolve_user_home_accepts_explicit_override_from_isolated_home(
     )
 
 
+@POSIX_INSTALLER_ONLY
 def test_resolve_user_home_allows_explicit_isolated_home_opt_in(
     tmp_path,
     monkeypatch,
