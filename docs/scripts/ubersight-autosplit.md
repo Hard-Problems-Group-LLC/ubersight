@@ -33,7 +33,7 @@ ubersight-autosplit
 Useful options:
 
 - `--dry-run` shows the commands without changing anything. Add `--json`
-  for machine-readable output.
+  for machine-readable output; `--json` only works with `--dry-run`.
 - `--ubersight-width 0.25 --console-height 0.4` changes the proportions.
 - `--backend tmux` (or `screen`, `wezterm`, `kitty`, `terminator`,
   `windows-terminal`) skips detection.
@@ -55,6 +55,15 @@ screen running on that remote host, or a WezTerm mux domain. Without one
 of those, it refuses with a message. Start tmux or screen on the remote
 host first, then run it there.
 
+## IDE terminals
+
+The integrated terminals of VS Code (and editors built on it) and of
+JetBrains IDEs cannot be split. They also inherit variables from the
+terminal that launched the IDE, which could send the new panes to that
+other window. `ubersight-autosplit` therefore refuses there; run tmux or
+GNU screen inside the IDE terminal first if you want the layout in it.
+Pass `--backend` only if you are sure which terminal should be split.
+
 ## Per-terminal notes
 
 - **Windows Terminal:** both new panes use your current profile.
@@ -69,7 +78,10 @@ host first, then run it there.
   switches to the `splits` layout.
 - **Terminator:** needs 2.1.2 or newer, with its D-Bus option enabled (the
   default). Splits are always 50/50, and focus ends on the newest pane, so
-  click the top-left pane afterward.
+  click the top-left pane afterward. The dashboard starts through your
+  login shell, which must accept `&&` (nushell and elvish do not). If
+  your default profile runs a custom command, that command replaces the
+  dashboard.
 
 ## Side Effects
 

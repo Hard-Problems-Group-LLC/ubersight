@@ -19,6 +19,9 @@ tree breaks ties. Emulator backends (Windows Terminal, WezTerm GUI, kitty,
 Terminator) can only split a window on the machine running the emulator,
 so they are refused inside SSH or mosh sessions. Multiplexers running on
 the remote host (tmux, GNU screen, WezTerm mux servers) still work there.
+IDE terminals such as VS Code's inherit the variables of whatever launched
+the IDE, so an emulator marker found there is refused unless the process
+tree confirms it.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from . import windows_processes
+from .dashboard import harden_windows_executable_search
 
 DEFAULT_UBERSIGHT_WIDTH = 0.30
 DEFAULT_CONSOLE_HEIGHT = 0.33
@@ -59,6 +63,7 @@ REMOTE_ANCESTOR_NAMES = {
     "sshd": "ssh",
     "sshd.exe": "ssh",
     "sshd-session": "ssh",
+    "sshd-session.exe": "ssh",
 }
 REMOTE_ENVIRONMENT_KEYS = ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
 REMOTE_MARKER = "remote"
@@ -128,7 +133,11 @@ def percent(fraction: float) -> int:
 def _ancestor_names_from_proc(
     pid: int, proc_root: Path = Path("/proc")
 ) -> tuple[str, ...]:
-    """Return ancestor command names from a Linux-style `/proc` tree."""
+    """Return ancestor command names from a Linux-style `/proc` tree.
+
+    The kernel stores the command name as raw bytes cut at 15 bytes, which
+    can split a multi-byte character, so the file is decoded leniently.
+    """
 
     names: list[str] = []
     current = pid
@@ -136,8 +145,12 @@ def _ancestor_names_from_proc(
     while current > 1 and current not in seen and len(names) < MAX_ANCESTOR_DEPTH:
         seen.add(current)
         try:
-            stat = (proc_root / str(current) / "stat").read_text(encoding="utf-8")
-        except OSError:
+            stat = (
+                (proc_root / str(current) / "stat")
+                .read_bytes()
+                .decode("utf-8", errors="replace")
+            )
+        except (OSError, ValueError):
             break
         open_paren = stat.find("(")
         close_paren = stat.rfind(")")
@@ -201,7 +214,11 @@ def ancestor_process_names(pid: int | None = None) -> tuple[str, ...]:
 
 
 def classify_ancestor(name: str) -> str | None:
-    """Map an ancestor process name to a backend, the remote marker, or None."""
+    """Map an ancestor process name to a backend, the remote marker, or None.
+
+    WezTerm matches by prefix because Linux cuts `/proc` command names at
+    15 bytes, so `wezterm-mux-server` appears as `wezterm-mux-ser`.
+    """
 
     lowered = name.lower()
     if lowered in REMOTE_ANCESTOR_NAMES:
@@ -210,11 +227,8 @@ def classify_ancestor(name: str) -> str | None:
         return TMUX
     if lowered.startswith("screen"):
         return SCREEN
-    if lowered.removesuffix(".exe") in {
-        "wezterm",
-        "wezterm-gui",
-        "wezterm-mux-server",
-    }:
+    stem = lowered.removesuffix(".exe")
+    if stem == "wezterm" or stem.startswith("wezterm-"):
         return WEZTERM
     if lowered == "kitty":
         return KITTY
@@ -242,6 +256,22 @@ def remote_session_reason(env: Mapping[str, str], ancestor_names: Sequence[str])
             return reason
     if any(env.get(key) for key in REMOTE_ENVIRONMENT_KEYS):
         return "ssh"
+    return ""
+
+
+def unsupported_terminal_reason(env: Mapping[str, str]) -> str:
+    """Name the unsupported IDE terminal hosting this shell, else ``""``.
+
+    VS Code (and its forks) and JetBrains IDEs inherit the environment of
+    the terminal that launched them, so a marker such as `WT_SESSION` or
+    `KITTY_WINDOW_ID` there points at a different window.
+    """
+
+    if env.get("TERM_PROGRAM", "").strip().lower() == "vscode":
+        return "the VS Code integrated terminal (TERM_PROGRAM=vscode)"
+    emulator = env.get("TERMINAL_EMULATOR", "").strip()
+    if emulator:
+        return f"an IDE terminal (TERMINAL_EMULATOR={emulator})"
     return ""
 
 
@@ -276,7 +306,8 @@ def detect_backend(
     present, which resolves leaked variables and nesting such as screen
     inside tmux. Crossing an SSH or mosh boundary first means no local
     emulator is reachable. Without ancestry, multiplexers are preferred and
-    emulators are refused in remote sessions.
+    emulators are refused in remote sessions and in unsupported IDE
+    terminals, where any emulator marker was inherited from elsewhere.
     """
 
     present = available_backends(env, is_windows=is_windows)
@@ -301,6 +332,14 @@ def detect_backend(
             f"This shell is running over {remote}, so the local terminal "
             "window cannot be split from here. Run ubersight-autosplit inside "
             "tmux or GNU screen on this host, or in a local terminal."
+        )
+    unsupported = unsupported_terminal_reason(env)
+    if unsupported:
+        raise AutosplitError(
+            f"This shell is running in {unsupported}, which ubersight-autosplit "
+            "cannot split; any terminal variables here were probably inherited "
+            "from the terminal that launched it. Run ubersight-autosplit in a "
+            "supported terminal, or pass --backend to choose one explicitly."
         )
     for backend in EMULATOR_PRIORITY:
         if backend in present:
@@ -380,6 +419,23 @@ def _escape_windows_terminal_argument(argument: str) -> str:
     return argument.replace(";", "\\;")
 
 
+def _quote_for_windows_terminal_join(argument: str) -> str:
+    """Pre-quote one dashboard argument for `wt`'s naive command-line join.
+
+    `wt` rebuilds the pane's command line by joining its arguments with
+    spaces and wrapping an argument in quotes only when it contains a space,
+    without escaping embedded quotes or trailing backslashes. Encoding each
+    argument with the MSVC rules first makes that join produce a correct
+    command line. For an argument with a space, the outer quotes are left
+    for `wt` to add.
+    """
+
+    quoted = subprocess.list2cmdline([argument])
+    if " " in argument:
+        return quoted[1:-1]
+    return quoted
+
+
 def plan_windows_terminal(request: LayoutRequest, env: Mapping[str, str]) -> SplitPlan:
     """Plan the layout as one chained `wt` invocation in the current window.
 
@@ -390,9 +446,10 @@ def plan_windows_terminal(request: LayoutRequest, env: Mapping[str, str]) -> Spl
 
     profile = env.get("WT_PROFILE_ID", "").strip()
     profile_args = ("-p", profile) if profile else ()
+    # `-d` is a wt option, so only the dashboard argv goes through the join.
     working_dir = _escape_windows_terminal_argument(str(request.working_dir))
     dashboard = tuple(
-        _escape_windows_terminal_argument(argument)
+        _escape_windows_terminal_argument(_quote_for_windows_terminal_join(argument))
         for argument in request.dashboard_command
     )
     argv = (
@@ -454,7 +511,10 @@ def plan_tmux(
     pane = env.get("TMUX_PANE", "").strip()
     if not pane:
         raise AutosplitError("The tmux backend needs TMUX_PANE; run inside tmux.")
-    working_dir = str(request.working_dir)
+    # tmux expands `#` formats in -c and silently falls back to $HOME when
+    # the result does not exist; `##` is a literal `#`. The argv after `--`
+    # is not expanded.
+    working_dir = str(request.working_dir).replace("#", "##")
     steps = (
         SplitStep(
             (
@@ -510,6 +570,8 @@ def plan_screen(request: LayoutRequest, version: tuple[int, int] | None) -> Spli
         )
 
     def command(*argv: str, cwd: Path | None = None) -> SplitStep:
+        """Return a screen step that inherits the caller's terminal."""
+
         return SplitStep(tuple(argv), cwd=cwd, interactive=True)
 
     working_dir = request.working_dir
@@ -634,6 +696,8 @@ def plan_kitty(
         notes.append("Could not read the kitty version; assuming a current release.")
 
     def launch(location: str, fraction: float, *extra: str) -> SplitStep:
+        """Return a `launch` step that splits the invoking kitty window."""
+
         bias = (f"--bias={percent(fraction)}",) if bias_supported else ()
         return SplitStep(
             (
@@ -683,6 +747,11 @@ def plan_terminator(
     target the invoking terminal by UUID. Terminator splits are always
     even, focus moves to each new pane, and failures are printed with exit
     status 0, so output starting with `ERROR` is treated as failure.
+
+    Terminator runs the `-x` string through the user's login shell as
+    `$SHELL -c`, so it needs a shell that accepts `&&`. A default profile
+    with `use_custom_command` enabled replaces the string entirely. Both
+    limits are noted in the plan rather than worked around.
     """
 
     uuid = env.get("TERMINATOR_UUID", "").strip()
@@ -720,6 +789,9 @@ def plan_terminator(
         "Terminator splits are always 50/50 and focus moves to the newest "
         "pane; select the top-left pane to continue.",
         "The console pane starts in the invoking terminal's directory.",
+        "The dashboard command runs through your login shell, which must "
+        "accept `&&` (nushell and elvish do not), and a default profile with "
+        "a custom command replaces it.",
     ]
     if version is None:
         notes.append("Could not read the Terminator version; assuming 2.1.2 or newer.")
@@ -789,20 +861,28 @@ def execute_plan(
         if which(step.argv[0]) is None:
             raise AutosplitError(f"{step.argv[0]} was not found on PATH.")
         cwd = str(step.cwd) if step.cwd is not None else None
-        if step.interactive:
-            completed = run(list(step.argv), cwd=cwd, check=False)
-            output = ""
-        else:
-            completed = run(
-                list(step.argv),
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-            output = f"{completed.stdout or ''}{completed.stderr or ''}".strip()
+        # A tool found on PATH can still fail to start, for example a broken
+        # `wt.exe` app-execution alias or a working directory that vanished.
+        try:
+            if step.interactive:
+                completed = run(list(step.argv), cwd=cwd, check=False)
+                output = ""
+            else:
+                completed = run(
+                    list(step.argv),
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                output = f"{completed.stdout or ''}{completed.stderr or ''}".strip()
+        except OSError as error:
+            raise AutosplitError(
+                f"{plan.backend} step {index} of {len(plan.steps)} failed: "
+                f"could not start {step.argv[0]}: {error}"
+            ) from error
         failed_by_output = bool(step.failure_prefix) and output.startswith(
             step.failure_prefix
         )
@@ -964,8 +1044,13 @@ def _plan_as_json(plan: SplitPlan) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     """Plan and run the Ubersight working layout for the current terminal."""
 
+    # `git`, `wt`, and `shutil.which` would otherwise find a program planted
+    # in the project directory before the real one on Windows.
+    harden_windows_executable_search()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.json and not args.dry_run:
+        parser.error("--json requires --dry-run")
     passthrough = list(args.ubersight_args)
     if passthrough[:1] == ["--"]:
         passthrough = passthrough[1:]

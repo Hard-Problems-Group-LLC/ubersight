@@ -1,6 +1,6 @@
 # Ubersight Autosplit
 
-Status: Implemented; verified live except WezTerm, kitty, and Terminator  
+Status: Implemented; verified live except WezTerm, kitty, Terminator, and GNU screen over mosh  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/ubersight-autosplit.md`
@@ -44,7 +44,8 @@ ubersight-autosplit [--backend auto|tmux|screen|wezterm|kitty|terminator|windows
 - The supervisor keeps the pane alive: `ubersight-stop` restart requests
   and crashes restart the dashboard in place, and Q closes the pane.
 - `--dry-run` prints `RUN:` lines without changing anything. These are
-  shell-neutral labels, not a script. `--json` prints the plan as JSON.
+  shell-neutral labels, not a script. `--json` prints the plan as JSON;
+  without `--dry-run` it is a usage error.
 
 ## Project Directory
 
@@ -71,18 +72,33 @@ ubersight-autosplit [--backend auto|tmux|screen|wezterm|kitty|terminator|windows
    multiplexer process whose marker is present wins. Markers leak into
    nested sessions, so the process tree breaks ties, for example screen
    inside tmux, or tmux started in Terminator.
+   - Linux cuts `/proc` command names at 15 bytes, so any `wezterm-*`
+     name counts as WezTerm; `wezterm-mux-server` appears as
+     `wezterm-mux-ser`.
+   - A cut can split a multi-byte character, so names are decoded
+     leniently rather than failing detection.
 3. Stop the walk at an SSH or mosh boundary (`sshd`, `sshd-session`,
-   `sshd.exe`, `mosh-server`). An emulator above that boundary belongs to
-   another session.
+   `sshd.exe`, `sshd-session.exe`, `mosh-server`). An emulator above that
+   boundary belongs to another session.
 4. Without a decisive ancestor:
    - use tmux or screen when exactly one marker is present;
    - if both are present, fail and ask for `--backend`;
    - refuse emulator backends when the session is remote. mosh keeps the
      bootstrap `SSH_*` variables, so those variables cover mosh too.
-5. Otherwise use the first emulator marker found, in this order: WezTerm,
+5. Refuse, with a message suggesting `--backend`, when the shell runs in
+   an IDE terminal that autosplit cannot split:
+   - `TERM_PROGRAM` is `vscode` (VS Code and its forks);
+   - `TERMINAL_EMULATOR` is set (JetBrains IDEs).
+
+   These terminals inherit the environment of whatever launched the IDE,
+   so a marker such as `WT_SESSION` or `KITTY_WINDOW_ID` there names a
+   different window. A supported terminal found by the ancestor walk in
+   step 2 still wins, and so does a multiplexer in step 4.
+6. Otherwise use the first emulator marker found, in this order: WezTerm,
    kitty, Terminator, Windows Terminal.
 
-An explicit `--backend` skips detection, including the remote refusal.
+An explicit `--backend` skips detection, including the remote and IDE
+terminal refusals.
 
 ## Backends
 
@@ -100,6 +116,16 @@ Details:
 - Both new panes reuse `WT_PROFILE_ID` with `-p` when it is set.
 - `wt` treats an unescaped `;` in any argument as a subcommand delimiter,
   so inserted values escape it as `\;`.
+- `wt` rebuilds the dashboard's command line by joining its arguments with
+  spaces, quoting only arguments that contain a space and escaping
+  nothing. So each dashboard argument is first encoded with the Windows
+  (MSVC) quoting rules, and then `;` is escaped. For an argument with a
+  space, the outer quotes are left for `wt` to add. Embedded quotes,
+  trailing backslashes, tabs, and empty arguments then reach the
+  dashboard intact.
+- `wt` expands `%NAME%` environment references in that command line, and
+  there is no escape for it. A passthrough argument containing
+  `%NAME%` for a defined variable reaches the dashboard expanded.
 - `-w 0` targets the most recently used window, which is the one the
   operator is typing in.
 
@@ -115,6 +141,9 @@ Details:
 - Before tmux 3.1, the plan uses `-p N` instead of `-l N%`.
 - The dashboard argv follows `--`, so tmux runs it directly instead of
   through `default-shell`, which may not be POSIX.
+- tmux expands `#` formats in the `-c` value and silently starts the pane
+  in `$HOME` when the result does not exist, so `#` in `DIR` is written
+  as `##`. The argv after `--` is not expanded and is left unchanged.
 - Splits are relative to the invoking pane, so run it from an unsplit
   window for a full-height dashboard.
 
@@ -187,11 +216,21 @@ Known limitations:
 - D-Bus control is local-only.
 - Terminator layouts can set ratios but only create new windows. An exact
   ratio mode would have to open a new window.
+- If the default profile enables `use_custom_command`, Terminator runs
+  that custom command in the new pane instead of the dashboard, and
+  `remotinator` still reports success.
+- Terminator runs the `-x` string under the user's login shell, as
+  `$SHELL -c`. Shells without `&&`, such as nushell or elvish, fail to
+  start the dashboard.
+- The plan prints a note naming both of these limitations.
 
 ## Execution
 
 - Steps run in order. The first failure stops the command with the step
   number, exit status, and output.
+- A step that cannot start at all, for example because of a broken
+  `wt.exe` app-execution alias or a project directory that has vanished,
+  fails the same way, with the step number and the system error.
 - Panes created before a failure are left in place, since closing them
   could discard work.
 - A missing tool is reported before anything runs.
@@ -208,6 +247,7 @@ Known limitations:
 | tmux and screen over SSH, tmux over mosh | WSL2 Fedora 44, loopback sshd, 2026-10-14 | Verified. |
 | Plain SSH or mosh shell | WSL2 Fedora 44, 2026-10-14 | Refused with a message naming the transport, even with leaked emulator markers. |
 | WezTerm, kitty, Terminator | Not yet | Pending. |
+| GNU screen over mosh | Not yet | Pending. |
 
 Details:
 
@@ -215,6 +255,9 @@ Details:
   console 139 by 16, and the dashboard 60 by 50, with focus left on the
   invoking pane. Over SSH and mosh, the remote tmux matched within its
   smaller window.
+- With tmux 3.7c on WSL2 Fedora 44 (2026-10-14), a project path
+  containing `#` and `#{session_name}` started both new panes in that
+  directory.
 - `ubersight-stop` restarted each dashboard in place under its
   supervisor, and Q closed the dashboard pane.
 - Arguments after `--` reached the dashboard.
@@ -233,11 +276,15 @@ Environment notes, not Ubersight defects:
 ## Acceptance Criteria
 
 - Unit tests cover:
-  - detection: ancestry tie-breaks, leaked variables, remote refusal, mux
-    servers;
+  - detection: ancestry tie-breaks, leaked variables, remote refusal, IDE
+    terminal refusal, mux servers under truncated `/proc` names;
   - every backend plan and its version gates;
+  - Windows Terminal dashboard arguments through `wt`'s command-line
+    join, round-tripped through `CommandLineToArgvW` on Windows;
   - executor failure handling and the project-directory rules.
 - On Windows, running from an unsplit Windows Terminal tab in a checkout
   produces the layout with focus on the invoking pane.
 - The operator verifies tmux, screen, WezTerm, kitty, and Terminator live
-  on Linux, including tmux and screen over SSH and mosh.
+  on Linux, including tmux and screen over SSH and mosh. The Terminator
+  check also confirms the documented behavior with a `use_custom_command`
+  default profile and with a login shell that lacks `&&`.

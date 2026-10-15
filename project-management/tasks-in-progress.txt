@@ -17,3 +17,13 @@ status notes, blockers, and ISO 8601 timestamps.
   2026-10-14T20:42:00-07:00 - The operator approved the merge after
   Slice 20 (the Linux wired-network mark), which is done, and a
   multi-angle review, which is next.
+
+* 2026-10-13T23:59:58-07:00 - Terminal workspace autosplit (roadmap Phase
+  12): `ubersight-autosplit`. Branch `feature/ubersight-autosplit`, which
+  merges `feature/windows-platform-support`. Specification:
+  `docs/specifications/ubersight-autosplit.md`. Owner: Claude and
+  operator. Requestor: operator.
+  2026-10-14T21:55:00-07:00 - Slices 17 and 18 are done. Slice 19's
+  WezTerm, kitty, and Terminator backends await live checks on the
+  operator's workstation (backlogged). Slice 21, the pre-merge review,
+  has its findings fixed; the merge to `trunk` is next.

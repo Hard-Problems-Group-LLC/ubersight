@@ -37,9 +37,12 @@ Active phase slices:
 * Slice 17: Add autosplit core, WT, and tmux, done.
 * Slice 18: Add autosplit GNU screen backend, done.
 * Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
+* Slice 21: Pre-merge review and trunk merge, active.
 
 Phase 11 slices, all done:
 
+* Slice 11: Fix Windows runtime blockers, done.
+* Slice 12: Add Windows process identity, done.
 * Slice 13: Port stop and restart workflow, done.
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
@@ -64,4 +67,5 @@ Status:
 - Phase 11 passed its Linux test run on 2026-10-14. Slice 20, the Linux
   `Ethernet (<LAN name>)` mark, was added afterwards.
 - The operator approved merging both branches to `trunk` after a
-  multi-angle review.
+  multi-angle review (Slice 21). The review's findings are fixed on both
+  branches; the merge comes next.
