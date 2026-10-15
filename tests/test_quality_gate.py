@@ -1,9 +1,10 @@
-"""Regression tests for the cached quality gate's file-scope selection.
+"""Regression tests for the cached quality gate's file scope and cache key.
 
 The gate fingerprints every in-scope file before deciding whether a check can
-be skipped. These tests pin two safety properties: checkout-local `.local/`
-state is never read, and ignore checks keep working when a submodule is
-populated, because `git check-ignore` rejects paths inside submodules.
+be skipped. These tests pin three safety properties: checkout-local `.local/`
+state is never read; ignore checks keep working when a submodule is
+populated, because `git check-ignore` rejects paths inside submodules; and a
+cached pass never carries over to another platform or Python version.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,10 +88,14 @@ def superproject(tmp_path: Path) -> Path:
 
 
 def relative_names(project: Path, paths) -> set[str]:
+    """Return `paths` as POSIX-style names relative to `project`."""
+
     return {path.relative_to(project).as_posix() for path in paths}
 
 
 def test_ignore_check_handles_populated_submodules(superproject: Path) -> None:
+    """Verify ignore checks cover the superproject and populated submodules."""
+
     gate = load_quality_gate_module()
     candidates = [
         superproject / "app.py",
@@ -107,6 +113,8 @@ def test_ignore_check_handles_populated_submodules(superproject: Path) -> None:
 
 
 def test_scope_excludes_local_state_and_submodule_ignores(superproject: Path) -> None:
+    """Verify the scan skips `.local/` and files a submodule ignores."""
+
     gate = load_quality_gate_module()
 
     files = gate.iter_scope_files(
@@ -128,6 +136,8 @@ def test_scope_excludes_local_state_and_submodule_ignores(superproject: Path) ->
 def test_scope_never_walks_local_state_even_without_ignore_checks(
     superproject: Path,
 ) -> None:
+    """Verify `.local/` stays out of scope even with ignore checks disabled."""
+
     gate = load_quality_gate_module()
 
     files = gate.iter_scope_files(
@@ -145,6 +155,8 @@ def test_scope_never_walks_local_state_even_without_ignore_checks(
 
 
 def test_ignore_check_fails_closed_outside_git(tmp_path: Path) -> None:
+    """Verify ignore checks raise instead of guessing outside a Git checkout."""
+
     gate = load_quality_gate_module()
     candidate = tmp_path / "file.txt"
     candidate.write_text("x\n", encoding="utf-8")
@@ -156,10 +168,13 @@ def test_ignore_check_fails_closed_outside_git(tmp_path: Path) -> None:
 def test_ignore_check_fails_closed_when_git_rejects_batch(
     monkeypatch, superproject: Path
 ) -> None:
+    """Verify a failed `git check-ignore` batch raises instead of passing."""
+
     gate = load_quality_gate_module()
     real_run = subprocess.run
 
     def failing_check_ignore(command, *args, **kwargs):
+        """Fail `git check-ignore` and pass every other command through."""
         if command[:2] == ["git", "check-ignore"]:
             return subprocess.CompletedProcess(command, 128, b"", b"fatal: boom")
         return real_run(command, *args, **kwargs)
@@ -168,3 +183,37 @@ def test_ignore_check_fails_closed_when_git_rejects_batch(
 
     with pytest.raises(RuntimeError, match="check-ignore failed"):
         gate.git_ignored_paths(superproject, [superproject / "app.py"])
+
+
+def test_fingerprint_is_keyed_by_platform_and_python_version(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Verify a pass cached on another platform or Python version never matches."""
+
+    gate = load_quality_gate_module()
+    source = tmp_path / "app.py"
+    source.write_text("print('app')\n", encoding="utf-8")
+    major, minor = sys.version_info[:2]
+
+    assert gate.execution_context() == (
+        f"platform:{sys.platform}\npython:{major}.{minor}\n"
+    )
+    baseline = gate.fingerprint_files(tmp_path, [source], "pytest")
+    assert gate.fingerprint_files(tmp_path, [source], "pytest") == baseline
+
+    for platform, version in (
+        ("other-platform", sys.version_info),
+        (sys.platform, (major, minor + 1, 0)),
+    ):
+        monkeypatch.setattr(
+            gate, "sys", SimpleNamespace(platform=platform, version_info=version)
+        )
+        assert gate.fingerprint_files(tmp_path, [source], "pytest") != baseline
+
+    # The patch level does not change which tests run, so it shares a key.
+    monkeypatch.setattr(
+        gate,
+        "sys",
+        SimpleNamespace(platform=sys.platform, version_info=(major, minor, 99)),
+    )
+    assert gate.fingerprint_files(tmp_path, [source], "pytest") == baseline

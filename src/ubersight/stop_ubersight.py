@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import time
 from dataclasses import dataclass
@@ -66,18 +67,43 @@ def _read_uid(path: Path) -> int | None:
     return None
 
 
-def _is_ubersight_dashboard_command(command: str) -> bool:
-    """Return whether one command line appears to be a Ubersight dashboard.
+DASHBOARD_SCRIPT_NAMES = frozenset({"ubersight", "ubersight.py"})
+# A supervisor is not a dashboard: stopping it would end the restart loop.
+# One-shot modes exit by themselves and handle no signals, so a SIGTERM
+# could only cut a status write short.
+NOT_A_DASHBOARD_ARGS = frozenset(
+    {"--supervise", "--once", "--write-status", "-h", "--help"}
+)
 
-    Supervisors run the same entry point with ``--supervise``; they are not
-    dashboards, and stopping one would end the restart loop.
+
+def _is_ubersight_dashboard_command(command: str) -> bool:
+    """Return whether one command line runs the Ubersight dashboard.
+
+    A dashboard is `python -m ubersight`, a Python interpreter running a
+    script named `ubersight` or `ubersight.py` (the installed launcher or the
+    checkout's `scripts/ubersight.py`), or such a script run directly.
+    Editors, linters, and shells that merely mention those names are not.
     """
 
     parts = [part for part in command.split() if part]
-    if "--supervise" in parts:
+    if not parts or NOT_A_DASHBOARD_ARGS & set(parts):
         return False
-    names = {Path(part).name for part in parts}
-    return bool({"ubersight.py", "ubersight"} & names)
+    if Path(parts[0]).name in DASHBOARD_SCRIPT_NAMES:
+        return True
+    if not re.fullmatch(r"python[0-9.]*", Path(parts[0]).name):
+        return False
+    arguments = iter(parts[1:])
+    for part in arguments:
+        if part == "-m":
+            return next(arguments, "") == "ubersight"
+        if part in {"-X", "-W"}:
+            next(arguments, "")
+            continue
+        if part == "-c":
+            return False
+        if not part.startswith("-"):
+            return Path(part).name in DASHBOARD_SCRIPT_NAMES
+    return False
 
 
 def find_ubersight_processes(
@@ -100,14 +126,15 @@ def find_ubersight_processes(
             continue
         if _read_uid(entry / "status") != current_uid:
             continue
+        start_ticks = dashboard._process_start_ticks(pid)
         command = _read_cmdline(entry / "cmdline")
-        if not command:
+        if not command or not _is_ubersight_dashboard_command(command):
             continue
-        if not _is_ubersight_dashboard_command(command):
+        # A PID reused between the reads would pair this command line with
+        # another process's identity, and that process would be signaled.
+        if not start_ticks or dashboard._process_start_ticks(pid) != start_ticks:
             continue
-        matches.append(
-            UbersightProcess(pid, command, dashboard._process_start_ticks(pid))
-        )
+        matches.append(UbersightProcess(pid, command, start_ticks))
     return tuple(sorted(matches, key=lambda process: process.pid))
 
 
@@ -121,13 +148,16 @@ def find_windows_dashboards(
     take_snapshot = snapshot or windows_processes.snapshot_processes
     is_dashboard = has_restart_event or windows_processes.has_restart_event
     current_pid = os.getpid()
-    matches = [
-        UbersightProcess(
-            entry.pid, entry.exe_name, dashboard._process_start_ticks(entry.pid)
-        )
-        for entry in take_snapshot()
-        if entry.pid != current_pid and is_dashboard(entry.pid)
-    ]
+    matches: list[UbersightProcess] = []
+    for entry in take_snapshot():
+        if entry.pid == current_pid or not is_dashboard(entry.pid):
+            continue
+        start_ticks = dashboard._process_start_ticks(entry.pid)
+        # The event must still exist after the identity read; otherwise the
+        # dashboard may have exited and its PID gone to another process.
+        if not start_ticks or not is_dashboard(entry.pid):
+            continue
+        matches.append(UbersightProcess(entry.pid, entry.exe_name, start_ticks))
     return tuple(sorted(matches, key=lambda process: process.pid))
 
 
@@ -154,22 +184,29 @@ def request_restart(process: UbersightProcess) -> bool:
         return windows_processes.signal_restart_event(process.pid)
     try:
         os.kill(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     return True
 
 
 def force_stop(process: UbersightProcess) -> bool:
-    """Forcibly end a dashboard that is still the discovered process."""
+    """Forcibly end a dashboard that is still the discovered process.
 
-    if not _is_running(process):
+    Without a recorded identity there is nothing to compare against, so
+    nothing is ended: the PID alone could belong to any process by now.
+    """
+
+    if not process.start_ticks or not _is_running(process):
         return False
     if os.name == "nt":
-        expected = int(process.start_ticks) if process.start_ticks.isdecimal() else None
-        return windows_processes.terminate_process(process.pid, expected)
+        if not process.start_ticks.isdecimal():
+            return False
+        return windows_processes.terminate_process(
+            process.pid, int(process.start_ticks)
+        )
     try:
         os.kill(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     return True
 

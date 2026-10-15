@@ -108,7 +108,10 @@ What it does:
 
 After that, `ubersight` and the other commands work from any new terminal.
 Rerun `.\install.ps1` to upgrade. Open dashboard panes do not block the
-upgrade.
+upgrade, except when it switches to a different Python, for example after
+you install a newer one. That upgrade rebuilds the virtual environment, so
+the installer stops before changing anything and asks you to close the
+dashboards (press Q in each pane) and rerun it.
 
 For development, run `.\install.ps1 --mode dev`. It builds the checkout's
 `.venv` with an editable install, installs the managed Git hooks, and points
@@ -130,4 +133,4 @@ On Windows, `windows-curses` is installed automatically as a
 platform-specific dependency. Background-job status lives under the
 project's ignored `.local/ubersight/background-jobs` directory. See
 `docs/scripts/ubersight.py.md` for the side-pane recipe, process-identity
-rules for job writers, and the features that are not yet ported.
+rules for job writers, and the known Windows limits.

@@ -52,10 +52,14 @@ def isolated_salt(monkeypatch, tmp_path: Path) -> None:
 
 
 def defaults_for(observation, memory: Path) -> ubersight.LocationEntryDefaults:
+    """Return the editor's defaults for `observation` against `memory`."""
+
     return ubersight._location_entry_defaults(observation, memory_path=memory)
 
 
 def type_text(fields, index, text):
+    """Type `text` one key at a time; return the fields and the field index."""
+
     for character in text:
         fields, index, _ = ubersight._apply_location_entry_key(
             fields, index, character, FakeCurses
@@ -113,6 +117,8 @@ def test_header_warns_when_nothing_identifies_the_network(tmp_path: Path) -> Non
 
 
 def wired_fields():
+    """Return an empty wired-network form."""
+
     return [
         ("LAN name", ""),
         ("Place", ""),
@@ -123,9 +129,9 @@ def wired_fields():
 
 
 def test_every_printable_character_can_be_typed_including_q() -> None:
-    fields, index = type_text(wired_fields(), 0, "Quincy Café q")
+    fields, index = type_text(wired_fields(), 0, "Example Café q")
 
-    assert fields[0] == ("LAN name", "Quincy Café q")
+    assert fields[0] == ("LAN name", "Example Café q")
     assert index == 0
 
 
@@ -176,6 +182,8 @@ def test_opsec_cycles_with_arrows_and_ignores_typing() -> None:
 
 
 def saved_records(memory: Path) -> list[dict]:
+    """Return the location records saved in `memory`."""
+
     return json.loads(memory.read_text(encoding="utf-8"))["locations"]
 
 
@@ -185,24 +193,27 @@ def test_wired_save_stores_lan_name_and_place_then_displays_both(
     memory = tmp_path / "memory.json"
     fields = wired_fields()
     fields[0] = ("LAN name", "Example Wired LAN")
-    fields[1] = ("Place", "Home office")
-    fields[2] = ("Detail", "Upstairs desk")
+    fields[1] = ("Place", "Example Home Office")
+    fields[2] = ("Detail", "Example Desk")
     fields[3] = ("OPSEC", "private-trusted")
 
     assert ubersight._save_location_entry(fields, WIRED, memory_path=memory) == ""
 
     (record,) = saved_records(memory)
-    assert record["label"] == "Home office"
+    assert record["label"] == "Example Home Office"
     assert record["lan_name"] == "Example Wired LAN"
-    assert record["display"] == {"coarse": "Home office", "fine": "Upstairs desk"}
+    assert record["display"] == {
+        "coarse": "Example Home Office",
+        "fine": "Example Desk",
+    }
     match = location_memory.lookup_location_memory(WIRED, memory_path=memory)
     assert match is not None and "gateway" in match.reasons
     status = ubersight._status_from_location_memory_match(
         WIRED, match, ubersight._local_now()
     )
     assert ubersight._network_display_segment(status) == "Ethernet (Example Wired LAN)"
-    assert status.location == "Home office"
-    assert status.fine_location == "Upstairs desk"
+    assert status.location == "Example Home Office"
+    assert status.fine_location == "Example Desk"
 
 
 def test_naming_only_the_lan_uses_it_as_the_place(tmp_path: Path) -> None:
@@ -223,12 +234,15 @@ def test_renaming_a_matched_place_updates_it_instead_of_duplicating(
     memory = tmp_path / "memory.json"
     first = wired_fields()
     first[0] = ("LAN name", "Example Wired LAN")
-    first[1] = ("Place", "Home office")
+    first[1] = ("Place", "Example Home Office")
     ubersight._save_location_entry(first, WIRED, memory_path=memory)
 
     defaults = defaults_for(WIRED, memory)
     assert defaults.matched and defaults.record_id
-    assert (defaults.lan_name, defaults.label) == ("Example Wired LAN", "Home office")
+    assert (defaults.lan_name, defaults.label) == (
+        "Example Wired LAN",
+        "Example Home Office",
+    )
     renamed = ubersight._location_entry_fields(defaults, wired=True)
     renamed[1] = ("Place", "Studio")
     ubersight._save_location_entry(
@@ -243,13 +257,13 @@ def test_renaming_a_matched_place_updates_it_instead_of_duplicating(
 def test_wifi_save_leaves_an_existing_lan_name_alone(tmp_path: Path) -> None:
     memory = tmp_path / "memory.json"
     location_memory.learn_location_memory(
-        "Home office",
+        "Example Home Office",
         observation=WIRED,
         memory_path=memory,
         lan_name="Example Wired LAN",
     )
     fields = [
-        ("Place", "Home office"),
+        ("Place", "Example Home Office"),
         ("Detail", ""),
         ("OPSEC", "private"),
         ("Threshold", "80"),
@@ -273,11 +287,15 @@ def test_wifi_save_leaves_an_existing_lan_name_alone(tmp_path: Path) -> None:
             "cannot save",
         ),
         ("Somewhere", WIFI, "0", "Threshold"),
+        ("Somewhere", WIFI, "nan", "Threshold"),
+        ("Somewhere", WIFI, "inf", "Threshold"),
     ],
 )
 def test_save_reports_problems_without_writing(
     tmp_path: Path, place, observation, threshold, message
 ) -> None:
+    """Missing names, no stable identity, or a bad threshold write nothing."""
+
     memory = tmp_path / "memory.json"
     fields = [
         ("Place", place),
@@ -290,3 +308,61 @@ def test_save_reports_problems_without_writing(
         fields, observation, memory_path=memory
     )
     assert not memory.exists()
+
+
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), 0.0])
+def test_memory_store_rejects_thresholds_that_could_never_match(
+    tmp_path: Path, threshold: float
+) -> None:
+    """A NaN or infinite threshold would silently disable the record."""
+
+    with pytest.raises(ValueError):
+        location_memory.learn_location_memory(
+            "Somewhere",
+            observation=WIFI,
+            memory_path=tmp_path / "memory.json",
+            confidence_threshold=threshold,
+        )
+
+
+def office(bssid: str, gateway: str) -> location_memory.LocationObservation:
+    """Return an observation of one office on the shared SSID `CorpNet`."""
+
+    return location_memory.LocationObservation(
+        "example-host",
+        "operator",
+        "CorpNet",
+        wifi_bssid=bssid,
+        gateway_macs=(gateway,),
+    )
+
+
+def test_an_ssid_only_match_never_renames_another_sites_record(
+    tmp_path: Path,
+) -> None:
+    """Offices sharing an SSID keep separate records when one is named."""
+
+    memory = tmp_path / "memory.json"
+    office_a = office("02:00:00:00:00:0a", "02:00:00:00:01:0a")
+    office_b = office("02:00:00:00:00:0b", "02:00:00:00:01:0b")
+    first = [
+        ("Place", "Example Office A"),
+        ("Detail", ""),
+        ("OPSEC", "private"),
+        ("Threshold", "80"),
+    ]
+    assert ubersight._save_location_entry(first, office_a, memory_path=memory) == ""
+
+    at_b = defaults_for(office_b, memory)
+    assert at_b.matched and at_b.label == "Example Office A"
+    assert at_b.record_id == ""
+    assert defaults_for(office_a, memory).record_id
+
+    renamed = ubersight._location_entry_fields(at_b, wired=False)
+    renamed[0] = ("Place", "Example Office B")
+    ubersight._save_location_entry(
+        renamed, office_b, memory_path=memory, record_id=at_b.record_id
+    )
+
+    labels = sorted(record["label"] for record in saved_records(memory))
+    assert labels == ["Example Office A", "Example Office B"]

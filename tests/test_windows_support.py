@@ -412,7 +412,7 @@ Network Destination        Netmask          Gateway       Interface  Metric
         192.0.2.0    255.255.255.0         On-link        192.0.2.50    281
        192.0.2.50  255.255.255.255         On-link        192.0.2.50    281
       192.0.2.255  255.255.255.255         On-link        192.0.2.50    281
-       100.64.0.0      255.192.0.0         On-link       100.100.1.2      5
+      203.0.113.0    255.255.255.0         On-link       203.0.113.7      5
         224.0.0.0        240.0.0.0         On-link        192.0.2.50    281
       169.254.0.0      255.255.0.0         On-link     169.254.10.20    281
 ===========================================================================
@@ -607,9 +607,9 @@ def test_named_wired_lan_shows_its_location_memory_label(
     )
     match = ubersight.location_memory.LocationMemoryMatch(
         record={
-            "label": "Home office",
+            "label": "Example Home Office",
             "lan_name": "Example Wired LAN",
-            "display": {"coarse": "Home office"},
+            "display": {"coarse": "Example Home Office"},
         },
         score=100.0,
         threshold=80.0,
@@ -666,6 +666,151 @@ def test_wired_networks_refresh_instead_of_reusing_stale_cache(
     assert status.wired is True
     assert status.location == "Example City"
     assert status.network_observed_at == now
+
+
+def counting_runner(netsh_output: str | None):
+    """Wrap `windows_probe_runner`, counting the commands each tool receives."""
+
+    run = windows_probe_runner(netsh_output)
+    counts: dict[str, int] = {}
+
+    def counted(args, **kwargs):
+        """Count this call by tool name, then run the fake."""
+
+        counts[args[0]] = counts.get(args[0], 0) + 1
+        return run(args, **kwargs)
+
+    return counted, counts
+
+
+def test_one_observation_runs_each_windows_tool_once() -> None:
+    """netsh and `route print` answer several questions from one run."""
+
+    run, counts = counting_runner(NETSH_DISCONNECTED)
+
+    observation = ubersight.observe_operator_location(run_command=run, geolocate=False)
+
+    assert observation.wired is True
+    assert counts["netsh"] == 1
+    assert counts["route"] == 1
+
+
+def test_withheld_wifi_name_is_reprobed_at_the_network_interval_only(
+    tmp_path: Path,
+) -> None:
+    """An unreadable SSID must not rerun every probe on each 1 s refresh."""
+
+    # The cache stores whole seconds.
+    now = ubersight._local_now().replace(microsecond=0)
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(
+        cache,
+        ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="Example Cafe Guest",
+            location="Example City",
+            updated_at=now - timedelta(seconds=60),
+            network_observed_at=now - timedelta(seconds=120),
+        ),
+    )
+    run, counts = counting_runner(NETSH_LOCATION_WITHHELD)
+
+    def refresh(seconds_later: int) -> ubersight.OperatorLocationStatus:
+        """Refresh as the dashboard would, `seconds_later` after `now`."""
+
+        return ubersight.load_or_refresh_operator_location(
+            cache,
+            now=now + timedelta(seconds=seconds_later),
+            network_max_age_seconds=30,
+            run_command=run,
+            geolocate=False,
+            memory_path=tmp_path / "memory.json",
+            network_profiles_path=tmp_path / "profiles.json",
+            observation_log_path=tmp_path / "observations.jsonl",
+        )
+
+    first = refresh(0)
+    probes_after_first = sum(counts.values())
+    for second in range(1, 30):
+        refresh(second)
+    probes_within_interval = sum(counts.values())
+    refresh(31)
+
+    assert first.wifi_ssid == "Example Cafe Guest"
+    # The failed probe proves nothing, so the network still counts as old.
+    assert first.network_observed_at == now - timedelta(seconds=120)
+    assert probes_after_first > 0
+    assert probes_within_interval == probes_after_first
+    assert sum(counts.values()) > probes_within_interval
+
+
+def test_unplugging_clears_a_cached_ethernet_mark(tmp_path: Path) -> None:
+    """A cached cable that the new observation does not see is not shown."""
+
+    now = ubersight._local_now()
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(
+        cache,
+        ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="unknown",
+            location="Example City",
+            updated_at=now - timedelta(seconds=60),
+            network_observed_at=now - timedelta(seconds=120),
+            wired=True,
+            network_label="Example Wired LAN",
+        ),
+    )
+
+    status = ubersight.load_or_refresh_operator_location(
+        cache,
+        now=now,
+        network_max_age_seconds=30,
+        run_command=windows_probe_runner(NETSH_LOCATION_WITHHELD),
+        geolocate=False,
+        memory_path=tmp_path / "memory.json",
+        network_profiles_path=tmp_path / "profiles.json",
+        observation_log_path=tmp_path / "observations.jsonl",
+    )
+
+    assert status.wired is False
+    assert ubersight._network_display_segment(status) == "WIFI: unknown"
+
+
+# Executable search ---------------------------------------------------------
+
+
+def test_windows_executable_search_skips_the_current_directory(monkeypatch) -> None:
+    """Commands are never looked up in the dashboard's working directory."""
+
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    monkeypatch.setattr(ubersight, "_is_windows", lambda: True)
+
+    ubersight.harden_windows_executable_search()
+
+    assert os.environ["NoDefaultCurrentDirectoryInExePath"] == "1"
+
+
+@windows_only
+def test_a_probe_planted_in_the_project_directory_never_runs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A checkout cannot hijack a bare command name such as `route`."""
+
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    planted = tmp_path / "ubersight-planted-probe.exe"
+    planted.write_bytes((system32 / "whoami.exe").read_bytes())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    # Unhardened, Windows finds and runs the planted file.
+    unhardened = subprocess.run(
+        ["ubersight-planted-probe"], capture_output=True, check=False
+    )
+    assert unhardened.returncode == 0
+
+    assert ubersight._run_command(("ubersight-planted-probe",)).returncode == 127
 
 
 # Process identity ----------------------------------------------------------

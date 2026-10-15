@@ -4,6 +4,35 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T21:50:00-07:00 - Fixed the Phase 11 findings of the
+  multi-angle pre-merge review (9 agents; every finding adversarially
+  verified):
+  - **Windows command search:** commands no longer run from the current
+    directory, so a planted `route.exe` in a checkout cannot run;
+  - **location editor:** an SSID-only match no longer renames another
+    site's record, and NaN or infinite thresholds are rejected;
+  - **network probes:** a withheld WiFi name no longer reruns every probe
+    each second, a stale `Ethernet` mark clears after unplugging, and one
+    observation runs each command once;
+  - **supervisor:** `--sup` can no longer nest supervisors endlessly, POSIX
+    Ctrl+C leaves the terminal clean, and `scripts/ubersight.py
+    --supervise` runs the checkout's code;
+  - **`ubersight-stop`:** POSIX matching ignores editors, linters, and
+    one-shot runs; PID reuse mid-scan is detected; `--force` needs a
+    recorded identity;
+  - **installer:** `install.ps1` no longer garbles non-ASCII interpreter
+    paths, skips a real Python behind the Store alias, or aborts under
+    Windows PowerShell 5.1 when a native command writes to stderr;
+    Windows venv-only mode installs `windows-curses`; a venv held open by
+    a running dashboard is never half-deleted; and the quality-gate cache
+    is keyed by platform and Python version;
+  - **tests:** a teardown race made the live Windows supervisor test fail
+    about one run in five;
+  - **docs, fixtures, and records:** stale Windows docs, the `lan_name`
+    label source, raw values in `last_observation`, fictional test
+    fixtures, and missing docstrings.
+  Owner: Claude. Requestor: operator.
+
 * 2026-10-14T20:42:00-07:00 - Added the Linux wired-network mark (Slice
   20). A wired Linux host now shows `Ethernet (<LAN name>)`, judged from
   `/sys/class/net`: a physical Ethernet NIC, or a bridge, bond, or VLAN on
@@ -20,6 +49,15 @@ and ISO 8601 timestamps.
   dnf/yum prerequisites, a Windows-only PATH test case marked as such, and
   an accurate `ubersight-stop --dry-run` summary. Owner: Claude and
   operator.
+
+* 2026-10-14T02:16:00-07:00 - Delivered native Windows support (roadmap
+  Phase 11, Slices 11 to 16) on `feature/windows-platform-support`:
+  Windows runtime fixes and process identity, `ubersight --supervise` and
+  a Windows-capable `ubersight-stop`, Windows network probes with the
+  `Ethernet (<LAN name>)` mark and the redesigned location editor,
+  `install.ps1` and the Windows stage two, and Windows test parity.
+  Specification: `docs/specifications/windows-platform-support.md`.
+  Owner: Claude and operator. Requestor: operator.
 
 * 2026-08-03T15:05:24-07:00 - Repaired and hardened shared-pyenv corruption
   recovery. Added explicit integrity detection, guarded transactional rebuilds,

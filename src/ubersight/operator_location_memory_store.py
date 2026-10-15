@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -427,8 +428,9 @@ def learn_location_memory(
     if lan_name is not None:
         record["lan_name"] = lan_name.strip()
     if confidence_threshold is not None:
-        if confidence_threshold <= 0:
-            raise ValueError("confidence threshold must be greater than zero")
+        # NaN and infinity pass `<= 0` but would stop the record matching.
+        if not math.isfinite(confidence_threshold) or confidence_threshold <= 0:
+            raise ValueError("confidence threshold must be a positive number")
         record["confidence_threshold"] = confidence_threshold
     record["display"] = {
         "coarse": label,

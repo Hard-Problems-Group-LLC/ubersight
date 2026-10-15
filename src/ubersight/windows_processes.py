@@ -274,6 +274,8 @@ class RestartEvent:
     """
 
     def __init__(self, handle: Any) -> None:
+        """Own `handle`, an open Win32 event handle, until `close`."""
+
         self._handle = handle
 
     @classmethod
@@ -443,6 +445,8 @@ def build_process_tree(
     created: dict[int, int | None] = {}
 
     def creation_of(pid: int) -> int | None:
+        """Return `pid`'s creation time, probing each process only once."""
+
         if pid not in created:
             created[pid] = creation_time(pid)
         return created[pid]

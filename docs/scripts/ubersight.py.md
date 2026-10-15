@@ -54,8 +54,10 @@ In live mode, Ubersight exposes a local hotkey bar:
   - **Keys:** Up/Down or Tab moves between fields, Enter saves, and Esc
     cancels. Every printable character can be typed, including `q`.
 
-  Saving updates the record that matched the current network, so renaming
-  a place never duplicates it.
+  Saving updates the record that matched the current network by access
+  point or router, so renaming a place never duplicates it. A match on the
+  WiFi name alone, which several sites may share, saves by Place name
+  instead, so naming a second office never renames the first.
 - `Q`: quit Ubersight.
 
 Print a one-shot text snapshot, useful for tests or log capture:
@@ -446,9 +448,10 @@ fixture SSID such as `Example Venue Guest WiFi` plus `Example City, Example
 Region, Example Country` to resolve to a likely venue such as `Example Venue,
 Example City, Example Region, Example Country`.
 
-WiFi detection uses three live inspection tiers before giving up: active
-NetworkManager scan SSIDs, NetworkManager connection literals, and wireless
-tool inspection through `iwgetid`, `iw`, or `iwconfig`. The active scan SSID
+WiFi detection uses four live inspection tiers before giving up: active
+NetworkManager scan SSIDs, NetworkManager connection literals, wireless
+tool inspection through `iwgetid`, `iw`, or `iwconfig`, and, on Windows,
+`netsh wlan show interfaces`. The active scan SSID
 is preferred because connection profile names may be operator-defined and can
 lag the actual network after a network change. If those all fail,
 Ubersight reuses the last cached SSID literal when one is available, so a
@@ -557,12 +560,16 @@ How it works:
   operator's dashboards even from a sandboxed agent session.
 - **Finding dashboards on POSIX:** the helper finds dashboard processes
   in `/proc` and sends `SIGTERM`, which the dashboard treats as a restart
-  request. Supervisor processes are never matched.
+  request. A dashboard is `python -m ubersight` or an interpreter running
+  `ubersight` or `ubersight.py`. Supervisors, `--once` and
+  `--write-status` runs, and editors or linters that merely open
+  `ubersight.py` are never matched.
 - **Waiting and exit status:** the helper waits up to `--wait-seconds`
   (default 5). It exits with status 1 if any dashboard is still running.
   `--force` then ends those dashboards, checking each process's identity
-  first so that a reused process ID is never killed. `--dry-run` lists the
-  matches without signaling them.
+  first so that a reused process ID is not killed; a process whose
+  identity could not be read is left alone. `--dry-run` lists the matches
+  without signaling them.
 
 The older `scripts/ubersight_wrapper.sh` still works on POSIX. It restarts
 after any exit, including Q.
@@ -595,8 +602,8 @@ contacting network providers.
 ## Windows
 
 Ubersight runs natively on Windows 11 in Windows Terminal or the classic
-console host. Windows support is being delivered in roadmap Phase 11. See
-`docs/specifications/windows-platform-support.md` for the current scope.
+console host. Windows support was delivered in roadmap Phase 11. See
+`docs/specifications/windows-platform-support.md` for the details.
 
 ### Terminal library
 
@@ -643,10 +650,15 @@ If that inspection proves fragile, or full command lines become necessary,
 the approved fallback is a Windows-only `psutil` dependency behind the same
 internal interface.
 
-### Not yet ported
+### Known limits
 
-- WiFi, subnet, and gateway probes (Slice 14). Until then the WiFi and
-  location rows report `unknown`.
+- Windows 11 can withhold WLAN details from command-line tools unless
+  location services are enabled for desktop apps. The WiFi row then reads
+  `unknown`, while router-based recognition keeps working.
+- In a Windows virtual machine without a WiFi adapter, the virtual network
+  counts as Ethernet.
+- Terminal rendering still uses curses through the `windows-curses`
+  package until the planned move to the Expletives library.
 
 ## Related Documents
 
