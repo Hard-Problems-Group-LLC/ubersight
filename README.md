@@ -84,3 +84,50 @@ only after the replacement passes its version and `curses` probes.
 
 Installer command diagnostics use `RUN:` as a shell-neutral label. They are
 informational output, not a script to replay in a shell.
+
+## Windows
+
+Ubersight runs natively on Windows 11. From a normal PowerShell terminal
+in the checkout, run:
+
+```powershell
+.\install.ps1
+```
+
+What it does:
+
+- builds a per-user virtual environment in `~\.local\share\ubersight\venv`;
+- copies the console commands to `~\.local\bin` as `.exe` launchers;
+- adds `~\.local\bin` to your user PATH when it is missing (pass
+  `--no-modify-path` to skip this);
+- uses the pinned Python when the `py` launcher has it, or the newest
+  Python 3 otherwise.
+
+After that, `ubersight` and the other commands work from any new terminal.
+Rerun `.\install.ps1` to upgrade. Open dashboard panes do not block the
+upgrade, except when it switches to a different Python, for example after
+you install a newer one. That upgrade rebuilds the virtual environment, so
+the installer stops before changing anything and asks you to close the
+dashboards (press Q in each pane) and rerun it.
+
+For development, run `.\install.ps1 --mode dev`. It builds the checkout's
+`.venv` with an editable install, installs the managed Git hooks, and points
+the launchers at that `.venv`. pyenv, direnv, and shell-init setup are
+skipped on Windows.
+
+The installer refuses to run from an AI agent session whose home directory
+is inside the checkout. Run it from a normal terminal, or pass
+`--user-home PATH`.
+
+Two PowerShell notes:
+
+- If the execution policy blocks local scripts, run
+  `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+- Write relative paths with a leading `.\`. Without it, PowerShell reads
+  `.venv\Scripts\ubersight` as a command inside a module named `.venv`.
+
+On Windows, `windows-curses` is installed automatically as a
+platform-specific dependency. Background-job status lives under the
+project's ignored `.local/ubersight/background-jobs` directory. See
+`docs/scripts/ubersight.py.md` for the side-pane recipe, process-identity
+rules for job writers, and the known Windows limits.

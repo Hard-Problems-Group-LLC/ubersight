@@ -8,3 +8,21 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   roles, scope, trigger criteria, decision records, reviewer independence,
   and its interaction with proposals and ACP. Owner: operator and Codex.
   Requestor: operator. No active blocker.
+
+* 2026-10-14T21:50:00-07:00 - Add a `.gitattributes` that keeps shell
+  scripts LF (`*.sh text eol=lf`) in Windows checkouts. With Git for
+  Windows' default `core.autocrlf=true`, `install.sh` and the other
+  scripts check out as CRLF and fail with `\r` errors when the same
+  checkout is used from WSL or Git Bash. Found by the Phase 11/12
+  pre-merge review. Owner: Claude. Requestor: Claude. No active blocker.
+
+* 2026-10-14T21:50:00-07:00 - Give every test function a docstring. The
+  project rule documents every callable, but most test functions on
+  `trunk` and in several Phase 11 test files describe themselves only by
+  name; the installer and autosplit tests now follow the rule. Owner:
+  Claude. Requestor: Claude. No active blocker.
+
+* 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
+  temporary `windows-curses` dependency to the Expletives library on its own
+  feature branch, separate from Windows compatibility work. Owner: operator.
+  Requestor: operator. Depends on Phase 11 landing first.

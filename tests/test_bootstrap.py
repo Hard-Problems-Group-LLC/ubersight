@@ -7,6 +7,8 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.python_environment_bootstrap import (
     PythonContextConfig,
     context_requires_virtualenv,
@@ -27,6 +29,26 @@ from scripts.python_environment_bootstrap import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+# Behavior that exists only on POSIX hosts. The Windows stage two never
+# builds or repairs a pyenv runtime: it uses the interpreter install.ps1
+# selected. Windows also needs no native curses build prerequisites, because
+# windows-curses ships prebuilt wheels.
+POSIX_PYENV_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "pyenv source builds and runtime repair run only on POSIX; Windows "
+        "installs use the interpreter install.ps1 selects"
+    ),
+)
+POSIX_SHELL_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "install_prerequisites.sh is a POSIX shell installer; Windows needs no "
+        "native curses build prerequisites"
+    ),
+)
 
 
 def load_install_stage_2_module():
@@ -67,14 +89,13 @@ def test_dev_setup_command_log_avoids_shell_redirection(monkeypatch, capsys):
 
     monkeypatch.setattr(dev_setup.subprocess, "run", fake_run)
 
-    dev_setup.run([Path("/managed/venv/bin/python"), "--version"])
+    python = Path("/managed/venv/bin/python")
+    dev_setup.run([python, "--version"])
 
     output = capsys.readouterr().out
-    assert "[dev-setup] RUN: /managed/venv/bin/python --version" in output
+    assert f"[dev-setup] RUN: {python} --version" in output
     assert " -> " not in output
-    assert calls == [
-        (["/managed/venv/bin/python", "--version"], dev_setup.REPO_ROOT, True)
-    ]
+    assert calls == [([str(python), "--version"], dev_setup.REPO_ROOT, True)]
 
 
 def test_load_python_environment_config_reads_runtime_selection():
@@ -87,6 +108,7 @@ def test_load_python_environment_config_reads_runtime_selection():
     assert selection_name(config.runtime) == "3.14.6"
 
 
+@POSIX_PYENV_ONLY
 def test_existing_pyenv_checkout_is_reused_without_vcs_mutation(tmp_path):
     """Verify existing pyenv checkout is reused without vcs mutation."""
     pyenv_root = tmp_path / ".pyenv"
@@ -115,6 +137,7 @@ def test_existing_pyenv_plugin_is_reused_without_vcs_mutation(tmp_path):
     assert ensure_pyenv_virtualenv_plugin(pyenv_root, unexpected_runner) == plugin_root
 
 
+@POSIX_PYENV_ONLY
 def test_runtime_context_setup_does_not_install_bootstrap_floor(monkeypatch, tmp_path):
     """Verify runtime context setup does not install bootstrap floor."""
     module = load_install_stage_2_module()
@@ -175,6 +198,7 @@ def test_runtime_context_setup_does_not_install_bootstrap_floor(monkeypatch, tmp
     assert (repo_root / ".python-version").read_text(encoding="utf-8") == "3.14.6\n"
 
 
+@POSIX_PYENV_ONLY
 def test_runtime_context_checks_headers_before_building_pyenv(monkeypatch, tmp_path):
     """Verify a new pyenv runtime checks native headers before compilation."""
 
@@ -224,6 +248,7 @@ def test_runtime_context_checks_headers_before_building_pyenv(monkeypatch, tmp_p
     assert calls == ["headers", "pyenv"]
 
 
+@POSIX_PYENV_ONLY
 def test_runtime_context_rebuilds_existing_runtime_without_curses(
     monkeypatch, tmp_path
 ):
@@ -295,6 +320,7 @@ def test_runtime_context_rebuilds_existing_runtime_without_curses(
     assert (repo_root / ".python-version").read_text(encoding="utf-8") == "3.14.6\n"
 
 
+@POSIX_PYENV_ONLY
 def test_runtime_context_does_not_rebuild_without_curses_headers(monkeypatch, tmp_path):
     """Verify a failed header preflight leaves an invalid runtime untouched."""
 
@@ -358,6 +384,7 @@ def test_runtime_context_does_not_rebuild_without_curses_headers(monkeypatch, tm
     assert calls == ["ensure"]
 
 
+@POSIX_PYENV_ONLY
 def test_broken_runtime_requires_explicit_rebuild_flag(monkeypatch, tmp_path):
     """An empty shared runtime must remain untouched without explicit consent."""
 
@@ -407,6 +434,7 @@ def test_broken_runtime_requires_explicit_rebuild_flag(monkeypatch, tmp_path):
     assert not (repo_root / ".python-version").exists()
 
 
+@POSIX_PYENV_ONLY
 def test_broken_runtime_rebuilds_after_explicit_authorization(monkeypatch, tmp_path):
     """The opt-in flag should rebuild and validate an unusable shared runtime."""
 
@@ -456,6 +484,7 @@ def test_broken_runtime_rebuilds_after_explicit_authorization(monkeypatch, tmp_p
     assert (repo_root / ".python-version").read_text(encoding="utf-8") == "3.14.6\n"
 
 
+@POSIX_PYENV_ONLY
 def test_rebuild_pyenv_context_preserves_then_replaces_runtime(tmp_path):
     """A rebuild should avoid pyenv's destructive in-place force mode."""
 
@@ -668,6 +697,8 @@ def test_verify_curses_support_reports_rebuild_path(monkeypatch):
 
     module = load_install_stage_2_module()
     runtime_python = Path("/managed/python")
+    # The ncurses advice is the POSIX remedy; Windows has its own message.
+    monkeypatch.setattr(module, "is_windows", lambda: False)
 
     def fake_run(command, **_kwargs):
         """Simulate a pyenv build that omitted the `_curses` extension."""
@@ -712,6 +743,7 @@ def test_verify_python_runtime_rejects_empty_executable(tmp_path):
     assert message == "interpreter file is empty"
 
 
+@POSIX_PYENV_ONLY
 def test_verify_python_runtime_accepts_matching_executable(tmp_path):
     """A runnable interpreter probe must report the configured patch release."""
 
@@ -754,7 +786,7 @@ def test_standard_virtualenv_keeps_matching_base_interpreter(monkeypatch, tmp_pa
     module = load_install_stage_2_module()
     base_python = tmp_path / "pyenv" / "bin" / "python"
     venv_path = tmp_path / "venv"
-    venv_python = venv_path / "bin" / "python"
+    venv_python = module.venv_python_path(venv_path)
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
     commands = []
@@ -781,7 +813,7 @@ def test_standard_virtualenv_rebuilds_after_base_interpreter_drift(
     module = load_install_stage_2_module()
     base_python = tmp_path / "pyenv" / "bin" / "python"
     venv_path = tmp_path / "venv"
-    venv_python = venv_path / "bin" / "python"
+    venv_python = module.venv_python_path(venv_path)
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
     commands = []
@@ -875,11 +907,12 @@ def test_install_git_hooks_prefers_repo_local_installer(monkeypatch, tmp_path):
         lambda command, cwd: commands.append((list(command), cwd)),
     )
 
-    module.install_git_hooks(Path("/tmp/venv/bin/python"))
+    venv_python = Path("/tmp/venv/bin/python")
+    module.install_git_hooks(venv_python)
 
     assert commands == [
         (
-            ["/tmp/venv/bin/python", str(installer)],
+            [str(venv_python), str(installer)],
             repo_root,
         )
     ]
@@ -901,12 +934,13 @@ def test_install_git_hooks_fallback_targets_repo_root(monkeypatch, tmp_path):
         lambda command, cwd: commands.append((list(command), cwd)),
     )
 
-    module.install_git_hooks(Path("/tmp/venv/bin/python"))
+    venv_python = Path("/tmp/venv/bin/python")
+    module.install_git_hooks(venv_python)
 
     assert commands == [
         (
             [
-                "/tmp/venv/bin/python",
+                str(venv_python),
                 str(installer),
                 "--repo-root",
                 str(repo_root),
@@ -1017,6 +1051,7 @@ def test_install_sh_delegates_root_bootstrap_prerequisites():
     assert "detect_package_manager()" not in content
 
 
+@POSIX_SHELL_ONLY
 def test_prerequisite_installer_plans_native_curses_dependencies():
     """Verify the direct installer selects a platform-native curses package."""
 

@@ -22,6 +22,11 @@ scripts/ubersight_wrapper.sh --process-root "$PID" --refresh-ms 500
 If Ubersight exits, the wrapper waits one second and starts it again. Press
 Ctrl-C in the wrapper terminal to stop the loop.
 
+`ubersight --supervise` replaces this wrapper on every platform, including
+Windows. Unlike the wrapper, the supervisor exits when you press Q in the
+dashboard. It restarts at once after an `ubersight-stop` request, and after
+one second following a crash.
+
 The wrapper prefers the repository `.venv/bin/python` interpreter when it is
 available, then falls back to `python3` from `PATH`. This keeps Ubersight
 aligned with the managed development runtime even when the shell's default

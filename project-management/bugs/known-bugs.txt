@@ -3,3 +3,10 @@ Known Bugs
 Ordered list of confirmed bugs awaiting work. Put highest-priority bug at the
 top. Use asterisk-plus-blank-line format, include concise context, owners, and
 ISO 8601 timestamps. Store any expanded per-bug notes under `open/`.
+
+* 2026-10-14T01:23:00-07:00 - Operator location state (location memory,
+  observations, salt, network profiles, location and Tailscale caches) is
+  stored per project under `.local/` instead of in a per-user store shared
+  across projects. Locations taught in one project are unknown in others.
+  Details: `bugs/open/per-user-operator-location-state.md`. Owner: Claude
+  and operator. Requestor: operator.

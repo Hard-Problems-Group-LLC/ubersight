@@ -10,25 +10,44 @@ reads prompts, transcripts, or repository source content.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import ipaddress
 import json
+import math
 import os
 import re
+import signal
 import socket
 import subprocess
+import sys
 import textwrap
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from . import atomic_files
 from . import operator_location_memory_store as location_memory
+from . import windows_processes
 
 DEFAULT_STATUS_PATH = Path(".local/ubersight/status.json")
+# Windows keeps project-scoped runtime state under the project's ignored
+# `.local/` tree; POSIX hosts use a per-user runtime directory instead.
+# Material that must be visible across projects belongs under
+# `%LOCALAPPDATA%\ubersight` on Windows; nothing needs that today.
+WINDOWS_PROJECT_RUNTIME_ROOT = Path(".local/ubersight")
+GIT_SSH_BATCH_OPTIONS = "-o BatchMode=yes -o ConnectTimeout=5"
+# Exit statuses shared by the dashboard, `ubersight --supervise`, and
+# `ubersight-stop`. 75 is EX_TEMPFAIL: the dashboard should start again.
+RESTART_EXIT_CODE = 75
+KEYBOARD_INTERRUPT_EXIT_CODE = 130
+WINDOWS_CONTROL_C_EXIT = 0xC000013A
+SUPERVISOR_CRASH_DELAY_SECONDS = 1.0
 DEFAULT_ORIGIN_CACHE_PATH = Path(".local/ubersight/origin-cache.json")
 DEFAULT_LOCATION_CACHE_PATH = Path(".local/ubersight/location-cache.json")
 DEFAULT_TAILSCALE_CACHE_PATH = Path(".local/ubersight/tailscale-cache.json")
@@ -68,6 +87,10 @@ VALID_BACKGROUND_JOB_STATES = {
     "running",
     "starting",
 }
+LINUX_SYS_CLASS_NET = Path("/sys/class/net")
+# A guest's paravirtual NIC, such as WSL2's, says nothing about the host's
+# own uplink, which may well be WiFi. `vif` is Xen's netfront driver.
+PARAVIRTUAL_NIC_DRIVERS = frozenset({"hv_netvsc", "virtio_net", "vmxnet3", "vif"})
 
 
 @dataclass(frozen=True)
@@ -160,11 +183,21 @@ class OperatorLocationStatus:
     opsec_level: str = ""
     network_observed_at: datetime | None = None
     network_fingerprint: str = ""
+    wired: bool = False
+    # The matched location-memory record's LAN name (`lan_name`), set in
+    # the `E` editor's "LAN name" field and shown as `Ethernet (<name>)`.
+    network_label: str = ""
+    # When a cheap probe last ran without identifying the network.
+    network_probed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
 class LocationEntryDefaults:
-    """Prefill values for the interactive local location-memory editor."""
+    """Prefill values for the interactive local location-memory editor.
+
+    `record_id` names the matched record, so saving updates it even when
+    the place is renamed.
+    """
 
     label: str
     fine_location: str
@@ -172,7 +205,8 @@ class LocationEntryDefaults:
     confidence_threshold: float
     matched: bool
     stable_identity: bool
-    identity_summary: str
+    lan_name: str = ""
+    record_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -248,23 +282,103 @@ def _timestamp_age_seconds(timestamp: datetime | None, now: datetime) -> float |
     return max(0.0, (now - timestamp.astimezone(now.tzinfo)).total_seconds())
 
 
+def _is_windows() -> bool:
+    """Return whether Ubersight is running on native Windows."""
+
+    return os.name == "nt"
+
+
+def harden_windows_executable_search() -> None:
+    """Stop Windows from running commands found in the current directory.
+
+    For a bare name such as `route`, `ip`, or `git`, CreateProcess looks in
+    the current directory before System32 and `PATH`. Ubersight runs from
+    project checkouts, so a planted `route.exe` or `ip.exe` there would run
+    on every network probe. Setting this variable in our own environment
+    turns that lookup off for every command this process starts.
+    """
+
+    if _is_windows():
+        os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+
+
+def _configured_git_ssh_command(cwd: Path | None) -> str:
+    """Return the repository's `core.sshCommand`, or an empty string."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "config", "--get", "core.sshCommand"],
+            cwd=str(cwd) if cwd is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _git_ssh_command(
+    env: dict[str, str],
+    cwd: Path | None,
+    *,
+    configured_ssh_command: Any = _configured_git_ssh_command,
+) -> str | None:
+    """Return the batch-mode `GIT_SSH_COMMAND` for a fetch, or `None`.
+
+    An environment `GIT_SSH_COMMAND` takes precedence over `core.sshCommand`,
+    so a blanket default would silently replace a user's configured SSH
+    client, such as Windows OpenSSH with its agent. Ubersight therefore keeps
+    an explicit environment choice, extends a configured command with batch
+    options, and only falls back to plain `ssh` when nothing is configured.
+    """
+
+    if env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH"):
+        return None
+    configured = configured_ssh_command(cwd)
+    if configured:
+        return f"{configured} {GIT_SSH_BATCH_OPTIONS}"
+    return f"ssh {GIT_SSH_BATCH_OPTIONS}"
+
+
 def _run_command(
     args: Sequence[str],
     *,
     cwd: Path | None = None,
     timeout_seconds: float = 10.0,
 ) -> CommandResult:
-    """Run a short local command without invoking a shell."""
+    """Run a short local command without invoking a shell.
 
+    Probes read from the null device so no command can consume the
+    dashboard's terminal input, and output is decoded as UTF-8 with
+    replacement so an unexpected byte cannot raise.
+    """
+
+    harden_windows_executable_search()
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=5")
+    # Read-only probes such as `git status` otherwise take `.git/index.lock`
+    # to refresh cached file stats. Polling every second, that makes the
+    # operator's own `git add` or commit fail at random with a lock error.
+    env.setdefault("GIT_OPTIONAL_LOCKS", "0")
+    # Only fetches reach a remote, so only they pay for the extra
+    # `git config` lookup that preserves a configured SSH client.
+    if tuple(args[:2]) == ("git", "fetch"):
+        ssh_command = _git_ssh_command(env, cwd)
+        if ssh_command is not None:
+            env["GIT_SSH_COMMAND"] = ssh_command
     try:
         completed = subprocess.run(
             list(args),
             cwd=str(cwd) if cwd is not None else None,
             env=env,
-            text=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
@@ -275,9 +389,34 @@ def _run_command(
     return CommandResult(
         tuple(args),
         completed.returncode,
-        completed.stdout,
-        completed.stderr,
+        _decode_probe_output(completed.stdout),
+        _decode_probe_output(completed.stderr),
     )
+
+
+def _decode_probe_output(data: bytes | str | None) -> str:
+    """Decode probe output without ever raising.
+
+    Git, Tailscale, and modern tools write UTF-8. Windows console tools such
+    as `netsh` write the OEM code page when piped, so non-ASCII WiFi names
+    need that codec once UTF-8 fails. Anything else is decoded with
+    replacement characters.
+    """
+
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if _is_windows():
+        try:
+            return data.decode("oem")
+        except (LookupError, UnicodeDecodeError):
+            pass
+    return data.decode("utf-8", errors="replace")
 
 
 def _coerce_status_row(raw: Any, *, id_key: str) -> tuple[str, str, str] | None:
@@ -360,7 +499,7 @@ def load_status(path: Path) -> UbersightStatus:
             source_error="missing",
         )
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(atomic_files.read_text_with_retry(path))
     except OSError as exc:
         return UbersightStatus(
             phase_id="",
@@ -410,7 +549,6 @@ def _phase_to_mapping(phase_status: PhaseStatus) -> dict[str, str]:
 def write_status_file(status: UbersightStatus, path: Path) -> None:
     """Atomically write Ubersight status JSON."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": SCHEMA,
         "updated_at": _local_now().isoformat(timespec="seconds"),
@@ -421,11 +559,9 @@ def write_status_file(status: UbersightStatus, path: Path) -> None:
         "blocked": status.blocked,
         "complete": status.complete,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def parse_slice_option(value: str) -> SliceStatus:
@@ -533,7 +669,6 @@ def _load_origin_cache(path: Path) -> OriginStatus | None:
 
 
 def _write_origin_cache(path: Path, status: OriginStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": ORIGIN_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -542,11 +677,9 @@ def _write_origin_cache(path: Path, status: OriginStatus) -> None:
         "marker": status.marker,
         "details": status.details,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def _git_status_marker(
@@ -787,7 +920,6 @@ def _load_tailscale_cache(path: Path) -> TailscaleStatus | None:
 
 
 def _write_tailscale_cache(path: Path, status: TailscaleStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": TAILSCALE_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -796,11 +928,9 @@ def _write_tailscale_cache(path: Path, status: TailscaleStatus) -> None:
         "tailnet_alias": status.tailnet_alias,
         "details": status.details,
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
 
 
 def _parse_tailscale_dns_alias(dns_name: str) -> str:
@@ -995,8 +1125,16 @@ def default_project_name(cwd: Path | None = None) -> str:
 
 
 def ubersight_runtime_root() -> Path:
-    """Return the per-user runtime root for Ubersight status files."""
+    """Return the runtime root for Ubersight background-job status files.
 
+    POSIX hosts use a per-user runtime directory shared by every project
+    context. Windows keeps project-scoped runtime state under the project's
+    ignored `.local/ubersight` tree, relative to the working directory like
+    the other Ubersight defaults.
+    """
+
+    if _is_windows():
+        return WINDOWS_PROJECT_RUNTIME_ROOT
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
     if xdg_runtime:
         return Path(xdg_runtime) / "ubersight"
@@ -1007,8 +1145,14 @@ def ubersight_runtime_root() -> Path:
 
 
 def ubersight_context_root(context: str | None = None) -> Path:
-    """Return a runtime context root such as `.../ubersight/example-app`."""
+    """Return a runtime context root such as `.../ubersight/example-app`.
 
+    On Windows the project-local runtime root already identifies the
+    project, so the context name selects only the banner, not a directory.
+    """
+
+    if _is_windows():
+        return ubersight_runtime_root()
     return ubersight_runtime_root() / _safe_context_name(
         context or default_project_name()
     )
@@ -1021,8 +1165,15 @@ def background_job_dir(context: str | None = None) -> Path:
 
 
 def _boot_id() -> str:
-    """Return Linux boot ID when available."""
+    """Return the Linux boot ID, or an empty string where none applies.
 
+    Windows process creation times are absolute and unique across boots, so
+    Windows needs no boot ID and returns an empty string, which disables
+    boot-ID comparison.
+    """
+
+    if _is_windows():
+        return ""
     try:
         return (
             Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
@@ -1032,8 +1183,16 @@ def _boot_id() -> str:
 
 
 def _process_start_ticks(pid: int) -> str:
-    """Return Linux `/proc/<pid>/stat` start ticks, or empty when unavailable."""
+    """Return a process start token, or an empty string when unavailable.
 
+    Linux reports `/proc/<pid>/stat` start ticks since boot. Windows reports
+    the process creation time as decimal FILETIME ticks, which producers can
+    read with `(Get-Process -Id $PID).StartTime.ToFileTimeUtc()`.
+    """
+
+    if _is_windows():
+        creation = windows_processes.process_creation_filetime(pid)
+        return "" if creation is None else str(creation)
     try:
         stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
     except OSError:
@@ -1056,6 +1215,10 @@ def _process_identity_is_live(
 ) -> bool:
     """Return whether `pid` appears to be the same live process."""
 
+    if _is_windows():
+        return _windows_process_identity_is_live(
+            pid, expected_start_ticks=expected_start_ticks
+        )
     proc_dir = Path("/proc") / str(pid)
     if not proc_dir.exists():
         return False
@@ -1065,6 +1228,32 @@ def _process_identity_is_live(
         current_start = _process_start_ticks(pid)
         if current_start and current_start != expected_start_ticks:
             return False
+    return True
+
+
+def _windows_process_identity_is_live(
+    pid: int,
+    *,
+    expected_start_ticks: str = "",
+    probe_process: Any = None,
+) -> bool:
+    """Return whether a Windows `pid` is still the recorded live process.
+
+    Only proof of exit, absence, or a different creation time counts as
+    dead. When Windows refuses inspection, the job file is kept rather than
+    deleting status for a process that may still be running.
+    """
+
+    probe = (probe_process or windows_processes.probe_process)(pid)
+    if probe.state in {
+        windows_processes.PROCESS_MISSING,
+        windows_processes.PROCESS_EXITED,
+    }:
+        return False
+    if probe.state != windows_processes.PROCESS_RUNNING:
+        return True
+    if expected_start_ticks and probe.creation_filetime is not None:
+        return str(probe.creation_filetime) == expected_start_ticks
     return True
 
 
@@ -1176,6 +1365,9 @@ def _coerce_location_status(raw: dict[str, Any]) -> OperatorLocationStatus | Non
         opsec_level=str(raw.get("opsec_level", "")).strip(),
         network_observed_at=_parse_timestamp(raw.get("network_observed_at")),
         network_fingerprint=str(raw.get("network_fingerprint", "")).strip(),
+        wired=raw.get("wired") is True,
+        network_label=str(raw.get("network_label", "")).strip(),
+        network_probed_at=_parse_timestamp(raw.get("network_probed_at")),
     )
 
 
@@ -1194,7 +1386,6 @@ def _load_location_cache(
 
 
 def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": LOCATION_CACHE_SCHEMA,
         "updated_at": (status.updated_at or _local_now()).isoformat(timespec="seconds"),
@@ -1206,15 +1397,39 @@ def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
         "opsec_level": status.opsec_level,
         "source": status.source,
         "network_fingerprint": status.network_fingerprint,
+        "wired": status.wired,
+        "network_label": status.network_label,
         "network_observed_at": (
             status.network_observed_at or status.updated_at or _local_now()
         ).isoformat(timespec="seconds"),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    if status.network_probed_at is not None:
+        payload["network_probed_at"] = status.network_probed_at.isoformat(
+            timespec="seconds"
+        )
+    atomic_files.atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
-    os.replace(tmp_path, path)
+
+
+def _run_each_command_once(run_command: Any) -> Any:
+    """Return `run_command` wrapped to run each distinct command only once.
+
+    One observation asks `netsh` and `route print` the same question several
+    times, and on Windows each run costs a tenth of a second or more.
+    """
+
+    results: dict[tuple[str, ...], CommandResult] = {}
+
+    def run(args: Sequence[str], **kwargs: Any) -> CommandResult:
+        """Run `args` the first time, then replay that result."""
+
+        key = tuple(args)
+        if key not in results:
+            results[key] = run_command(args, **kwargs)
+        return results[key]
+
+    return run
 
 
 def observe_operator_location(
@@ -1223,23 +1438,51 @@ def observe_operator_location(
     geolocate: bool = True,
     urlopen_func: Any = urlopen,
     fallback_ssid: str = "",
+    sys_class_net: Path | None = None,
 ) -> location_memory.LocationObservation:
-    """Collect local-only signals describing the current operator environment."""
+    """Collect local-only signals describing the current operator environment.
 
+    `fallback_ssid`, usually the cached SSID, stands in when every WiFi
+    probe fails, unless the observation proves a cable. `sys_class_net`
+    replaces `/sys/class/net`, which the Linux wired check reads, so tests
+    never depend on the host's own network devices.
+    """
+
+    run_command = _run_each_command_once(run_command)
     network_estimate = (
         _geolocation_from_ip(urlopen_func=urlopen_func) if geolocate else None
     )
+    wifi_ssid = _active_wifi_ssid(run_command=run_command)
+    gateway_routes = _default_gateway_routes(run_command)
+    gateway_macs = _gateway_macs_for_routes(gateway_routes, run_command)
+    # Wired only on affirmative evidence. Linux shows it in sysfs; Windows
+    # shows it as a WLAN service with no connection. A WLAN query that
+    # Windows withholds for location permission must not read as a cable.
+    wired = (
+        wifi_ssid == "unknown"
+        and bool(gateway_macs)
+        and (
+            _linux_routes_are_wired(
+                tuple(dict.fromkeys(interface for interface, _ in gateway_routes)),
+                LINUX_SYS_CLASS_NET if sys_class_net is None else sys_class_net,
+            )
+            or _wifi_reported_disconnected(run_command)
+        )
+    )
+    # A cable explains the missing WiFi name. Reusing the cached SSID then
+    # would keep showing the network the operator just left.
+    if not wired and wifi_ssid == "unknown" and fallback_ssid not in {"", "unknown"}:
+        wifi_ssid = fallback_ssid
     return location_memory.LocationObservation(
         hostname=socket.gethostname(),
         username=getpass.getuser(),
-        wifi_ssid=_active_wifi_ssid(
-            run_command=run_command, fallback_ssid=fallback_ssid
-        ),
+        wifi_ssid=wifi_ssid,
         wifi_bssid=_active_wifi_bssid(run_command=run_command),
         local_subnets=_local_ipv4_subnets(run_command=run_command),
-        gateway_macs=_default_gateway_macs(run_command=run_command),
+        gateway_macs=gateway_macs,
         network_estimate=network_estimate,
         observed_at=_local_now(),
+        wired=wired,
     )
 
 
@@ -1264,18 +1507,22 @@ def _active_wifi_bssid(run_command: Any = _run_command) -> str:
             match = re.search(r"Connected to ([0-9a-fA-F:]{17})", link.stdout)
             if match:
                 return match.group(1).lower()
-    return ""
+    return _wifi_bssid_from_netsh(run_command)
 
 
 def _local_ipv4_subnets(run_command: Any = _run_command) -> tuple[str, ...]:
-    """Return globally scoped local IPv4 networks visible to this session."""
+    """Return globally scoped local IPv4 networks visible to this session.
+
+    Linux reads `ip addr`; Windows, where `ip` does not exist, falls back to
+    the on-link routes of interfaces that carry a default route.
+    """
 
     result = run_command(
         ("ip", "-o", "-4", "addr", "show", "scope", "global"),
         timeout_seconds=3.0,
     )
     if result.returncode != 0:
-        return ()
+        return _windows_local_subnets(run_command)
     subnets: list[str] = []
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -1295,11 +1542,15 @@ def _local_ipv4_subnets(run_command: Any = _run_command) -> tuple[str, ...]:
 def _default_gateway_routes(
     run_command: Any = _run_command,
 ) -> tuple[tuple[str, str], ...]:
-    """Return default route `(interface, gateway-ip)` pairs."""
+    """Return default route `(interface, gateway-ip)` pairs.
+
+    Linux names the interface (`eth0`); the Windows fallback identifies it
+    by its IPv4 address, which `arp -N` accepts.
+    """
 
     result = run_command(("ip", "route", "show", "default"), timeout_seconds=3.0)
     if result.returncode != 0:
-        return ()
+        return _windows_default_routes(run_command)
     routes: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -1326,10 +1577,16 @@ def _default_gateway_interfaces(run_command: Any = _run_command) -> tuple[str, .
 
 
 def _normalized_mac(value: str) -> str:
-    """Return a normalized MAC address found in `value`, if any."""
+    """Return a normalized MAC address found in `value`, if any.
 
-    match = re.search(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b", value)
-    return match.group(0).lower() if match else ""
+    Accepts colon form (Linux) and dash form (Windows `arp`), and returns
+    lower-case colon form so stored signals match across platforms.
+    """
+
+    match = re.search(
+        r"\b[0-9a-fA-F]{2}([:-])[0-9a-fA-F]{2}(?:\1[0-9a-fA-F]{2}){4}\b", value
+    )
+    return match.group(0).replace("-", ":").lower() if match else ""
 
 
 def _neighbor_mac_for_gateway(
@@ -1355,7 +1612,7 @@ def _neighbor_mac_for_gateway(
         timeout_seconds=3.0,
     )
     if neighbors.returncode != 0:
-        return ""
+        return _windows_gateway_mac(gateway_ip, interface, run_command)
     for line in neighbors.stdout.splitlines():
         parts = line.split()
         if parts and parts[0] == gateway_ip:
@@ -1366,8 +1623,16 @@ def _neighbor_mac_for_gateway(
 def _default_gateway_macs(run_command: Any = _run_command) -> tuple[str, ...]:
     """Return default-gateway router MAC addresses when the OS exposes them."""
 
+    return _gateway_macs_for_routes(_default_gateway_routes(run_command), run_command)
+
+
+def _gateway_macs_for_routes(
+    routes: Sequence[tuple[str, str]], run_command: Any
+) -> tuple[str, ...]:
+    """Return the router MAC addresses behind `(interface, gateway-ip)` routes."""
+
     macs: list[str] = []
-    for interface, gateway_ip in _default_gateway_routes(run_command):
+    for interface, gateway_ip in routes:
         mac = _neighbor_mac_for_gateway(
             gateway_ip,
             interface,
@@ -1376,6 +1641,248 @@ def _default_gateway_macs(run_command: Any = _run_command) -> tuple[str, ...]:
         if mac and mac != "00:00:00:00:00:00" and mac not in macs:
             macs.append(mac)
     return tuple(macs)
+
+
+def _linux_routes_are_wired(interfaces: Sequence[str], sys_class_net: Path) -> bool:
+    """Return whether every default route leaves through a wired Linux link.
+
+    Elsewhere, including Windows, where routes name interface addresses,
+    no interface is found and nothing is affirmed.
+    """
+
+    return bool(interfaces) and all(
+        _linux_interface_kind(sys_class_net, interface) == "wired"
+        for interface in interfaces
+    )
+
+
+def _linux_interface_kind(sys_class_net: Path, interface: str, depth: int = 0) -> str:
+    """Classify a Linux network interface as `wired`, `wireless`, or `other`.
+
+    Reads sysfs only:
+
+    - Wireless: an 802.11 device (`wireless` or `phy80211`), or a `DEVTYPE`
+      of `wlan` or `wwan` (mobile broadband).
+    - Wired: an Ethernet-type device (`type` 1) backed by hardware
+      (`device`), unless its driver is a hypervisor's paravirtual NIC.
+    - A bridge, bond, or VLAN has no hardware of its own, so it takes its
+      kind from the devices beneath it (`lower_*`): wireless if any is
+      wireless, else wired if any is wired.
+    - Anything else, such as a tunnel, a veth pair, a virtual machine's NIC,
+      or an unknown name, is `other`.
+    """
+
+    # Stacks are rarely more than a VLAN on a bond on a NIC; the depth
+    # limit only guards against a malformed tree.
+    if depth > 4 or not interface or interface in {".", ".."} or "/" in interface:
+        return "other"
+    path = sys_class_net / interface
+    try:
+        uevent = (path / "uevent").read_text(encoding="utf-8", errors="replace")
+        link_type = (path / "type").read_text(encoding="utf-8").strip()
+        if (
+            (path / "wireless").exists()
+            or (path / "phy80211").exists()
+            or re.search(r"^DEVTYPE=(?:wlan|wwan)$", uevent, re.MULTILINE)
+        ):
+            return "wireless"
+        if link_type != "1":
+            return "other"
+        if (path / "device").exists():
+            device_uevent = (path / "device" / "uevent").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            driver = re.search(r"^DRIVER=(\S+)$", device_uevent, re.MULTILINE)
+            if driver and driver.group(1) in PARAVIRTUAL_NIC_DRIVERS:
+                return "other"
+            return "wired"
+        lowers = sorted(
+            entry.name.removeprefix("lower_")
+            for entry in path.iterdir()
+            if entry.name.startswith("lower_")
+        )
+    except OSError:
+        return "other"
+    kinds = {_linux_interface_kind(sys_class_net, lower, depth + 1) for lower in lowers}
+    if "wireless" in kinds:
+        return "wireless"
+    return "wired" if "wired" in kinds else "other"
+
+
+def _ipv4(value: str) -> ipaddress.IPv4Address | None:
+    """Return `value` as an IPv4 address, or None when it is not one."""
+
+    try:
+        return ipaddress.IPv4Address(value)
+    except ValueError:
+        return None
+
+
+def _parse_windows_default_routes(output: str) -> tuple[tuple[str, str], ...]:
+    """Parse `route print -4` rows into `(interface-ip, gateway-ip)` pairs.
+
+    Default-route rows read `0.0.0.0 0.0.0.0 <gateway> <interface> <metric>`.
+    Matching addresses and column positions instead of translated headings
+    keeps this working in every Windows display language. The interface is
+    read from the right: some languages translate `On-link` into several
+    words, which shifts every column counted from the left.
+    """
+
+    routes: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0] != "0.0.0.0" or fields[1] != "0.0.0.0":
+            continue
+        gateway, interface = fields[2], fields[-2]
+        if _ipv4(gateway) is None or _ipv4(interface) is None:
+            continue
+        if (interface, gateway) not in routes:
+            routes.append((interface, gateway))
+    return tuple(routes)
+
+
+def _parse_windows_local_subnets(
+    output: str, interface_ips: Sequence[str]
+) -> tuple[str, ...]:
+    """Parse on-link `route print -4` rows into subnets of the given interfaces.
+
+    A row counts when its destination is the network of its interface
+    address under its netmask. Host, default, loopback, link-local, and
+    multicast routes are skipped.
+    """
+
+    wanted = set(interface_ips)
+    subnets: list[str] = []
+    for line in output.splitlines():
+        fields = line.split()
+        # The interface is the second-to-last column; see the note on
+        # translated `On-link` text in `_parse_windows_default_routes`.
+        if len(fields) < 5 or fields[-2] not in wanted:
+            continue
+        destination, netmask, interface = fields[0], fields[1], fields[-2]
+        if _ipv4(destination) is None or _ipv4(netmask) is None:
+            continue
+        if netmask in {"0.0.0.0", "255.255.255.255"}:
+            continue
+        try:
+            network = ipaddress.IPv4Network(f"{destination}/{netmask}")
+            own_network = ipaddress.IPv4Interface(f"{interface}/{netmask}").network
+        except ValueError:
+            continue
+        if network != own_network:
+            continue
+        if network.is_loopback or network.is_link_local or network.is_multicast:
+            continue
+        label = str(network)
+        if label not in subnets:
+            subnets.append(label)
+    return tuple(subnets)
+
+
+def _windows_route_table(run_command: Any) -> str:
+    """Return `route print -4` output, or an empty string when unavailable."""
+
+    result = run_command(("route", "print", "-4"), timeout_seconds=3.0)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _windows_default_routes(run_command: Any) -> tuple[tuple[str, str], ...]:
+    """Return Windows default routes as `(interface-ip, gateway-ip)` pairs."""
+
+    return _parse_windows_default_routes(_windows_route_table(run_command))
+
+
+def _windows_local_subnets(run_command: Any) -> tuple[str, ...]:
+    """Return subnets of Windows interfaces that carry a default route.
+
+    Interfaces without a default route, such as VPN tunnels, look the same
+    everywhere and would only blur location matching.
+    """
+
+    table = _windows_route_table(run_command)
+    interfaces = [interface for interface, _ in _parse_windows_default_routes(table)]
+    if not interfaces:
+        return ()
+    return _parse_windows_local_subnets(table, interfaces)
+
+
+def _windows_gateway_mac(gateway_ip: str, interface_ip: str, run_command: Any) -> str:
+    """Return a gateway's MAC address from the Windows ARP cache."""
+
+    if _ipv4(gateway_ip) is None or _ipv4(interface_ip) is None:
+        return ""
+    result = run_command(
+        ("arp", "-a", gateway_ip, "-N", interface_ip), timeout_seconds=3.0
+    )
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == gateway_ip:
+            return _normalized_mac(fields[1])
+    return ""
+
+
+def _netsh_wlan_output(run_command: Any) -> str | None:
+    """Return `netsh wlan show interfaces` output, or None when unavailable."""
+
+    result = run_command(("netsh", "wlan", "show", "interfaces"), timeout_seconds=3.0)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _parse_netsh_ssid(output: str) -> str:
+    """Return the connected SSID from `netsh wlan show interfaces` output."""
+
+    for line in output.splitlines():
+        match = re.match(r"^\s*SSID\s*:\s*(.*?)\s*$", line)
+        if match and match.group(1):
+            return match.group(1)
+    return "unknown"
+
+
+def _parse_netsh_bssid(output: str) -> str:
+    """Return the connected access point's BSSID from netsh output.
+
+    Newer Windows 11 builds label it `AP BSSID`; older builds use `BSSID`.
+    """
+
+    for line in output.splitlines():
+        if re.match(r"^\s*(?:AP\s+)?BSSID\s*:", line):
+            mac = _normalized_mac(line)
+            if mac:
+                return mac
+    return ""
+
+
+def _active_wifi_from_netsh(run_command: Any) -> str:
+    """Return the WiFi SSID through netsh, the Windows inspection tier."""
+
+    output = _netsh_wlan_output(run_command)
+    return "unknown" if output is None else _parse_netsh_ssid(output)
+
+
+def _wifi_bssid_from_netsh(run_command: Any) -> str:
+    """Return the WiFi BSSID through netsh, or an empty string."""
+
+    output = _netsh_wlan_output(run_command)
+    return "" if output is None else _parse_netsh_bssid(output)
+
+
+def _wifi_reported_disconnected(run_command: Any) -> bool:
+    """Return whether the WLAN service affirmatively reports no connection.
+
+    netsh succeeding without an SSID means the WiFi adapters are
+    disconnected, turned off, or absent. Output that mentions location
+    permission means Windows withheld the details, which proves nothing.
+    Where netsh does not exist, as on Linux, nothing is affirmed.
+    """
+
+    output = _netsh_wlan_output(run_command)
+    if output is None:
+        return False
+    if "location" in output.casefold():
+        return False
+    return _parse_netsh_ssid(output) == "unknown"
 
 
 def _location_network_fingerprint(
@@ -1430,6 +1937,8 @@ def _status_from_location_memory_match(
         opsec_level=str(record.get("opsec_level", "")).strip(),
         network_observed_at=now,
         network_fingerprint=_location_network_fingerprint(observation),
+        wired=observation.wired,
+        network_label=str(record.get("lan_name", "")).strip(),
     )
 
 
@@ -1469,6 +1978,7 @@ def _active_wifi_ssid(
         _active_wifi_from_nmcli_scan,
         _active_wifi_from_nmcli_connection,
         _active_wifi_from_wireless_tools,
+        _active_wifi_from_netsh,
     ):
         ssid = inspector(run_command)
         if ssid != "unknown":
@@ -1530,7 +2040,7 @@ def _active_wifi_from_wireless_tools(run_command: Any) -> str:
             ssid = _ssid_from_iw_link(link.stdout)
             if ssid != "unknown":
                 return ssid
-    iwconfig = run_command(("iwconfig"), timeout_seconds=3.0)
+    iwconfig = run_command(("iwconfig",), timeout_seconds=3.0)
     if iwconfig.returncode == 0:
         ssid = _ssid_from_iwconfig(iwconfig.stdout)
         if ssid != "unknown":
@@ -2088,14 +2598,29 @@ def load_or_refresh_operator_location(
         ):
             if network_age is not None and network_age <= network_max_age_seconds:
                 return cached
+            probe_age = _timestamp_age_seconds(cached.network_probed_at, now)
+            if probe_age is not None and probe_age <= network_max_age_seconds:
+                return cached
             network_observation = observe_operator_location(
                 run_command=run_command,
                 geolocate=False,
                 urlopen_func=urlopen_func,
                 fallback_ssid="",
             )
-            if network_observation.wifi_ssid == "unknown":
-                return cached
+            # An unknown SSID usually means a failed WiFi probe, so the
+            # cache wins; on a cable it is the normal state. A cached cable
+            # that this observation no longer sees is not trusted, though.
+            # The failed probe is not proof the operator stayed put, so
+            # `network_observed_at` keeps aging. `network_probed_at` only
+            # spaces out the retries, which cost about a second on Windows.
+            if (
+                network_observation.wifi_ssid == "unknown"
+                and not network_observation.wired
+                and not cached.wired
+            ):
+                probed = replace(cached, network_probed_at=now)
+                _write_location_cache(cache_path, probed)
+                return probed
             if _same_operator_network(cached, network_observation):
                 refreshed_network = replace(
                     cached,
@@ -2106,6 +2631,7 @@ def load_or_refresh_operator_location(
                     network_fingerprint=_location_network_fingerprint(
                         network_observation
                     ),
+                    wired=network_observation.wired,
                 )
                 _write_location_cache(cache_path, refreshed_network)
                 return refreshed_network
@@ -2196,6 +2722,7 @@ def load_or_refresh_operator_location(
         opsec_level="public" if wifi_hotspot else "",
         network_observed_at=now,
         network_fingerprint=_location_network_fingerprint(observation),
+        wired=observation.wired,
     )
     _write_location_cache(cache_path, refreshed)
     location_memory.append_location_observation(observation_log_path, observation)
@@ -2208,6 +2735,19 @@ def _read_uptime(proc_root: Path) -> float | None:
         return float(text.split()[0])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _clock_ticks_per_second() -> int:
+    """Return the `/proc` clock-tick rate, defaulting to Linux's usual 100.
+
+    Hosts without `os.sysconf`, such as Windows reading a test fixture tree,
+    use the default rate.
+    """
+
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is None:
+        return 100
+    return int(sysconf(os.sysconf_names["SC_CLK_TCK"]))
 
 
 def _read_process(
@@ -2235,7 +2775,7 @@ def _read_process(
     elapsed_seconds = None
     if uptime_seconds is not None and len(rest) > 19:
         try:
-            ticks_per_second = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+            ticks_per_second = _clock_ticks_per_second()
             start_ticks = int(rest[19])
             elapsed_seconds = max(
                 0.0, uptime_seconds - (start_ticks / ticks_per_second)
@@ -2263,13 +2803,65 @@ def _read_process(
     )
 
 
-def collect_process_tree(
-    root_pid: int | None, proc_root: Path = Path("/proc")
+def _collect_windows_process_tree(
+    root_pid: int,
+    *,
+    snapshot: Any = None,
+    probe_process: Any = None,
+    now_filetime: int | None = None,
 ) -> tuple[WorkerProcess, ...]:
-    """Return a best-effort process tree rooted at ``root_pid``."""
+    """Return a Windows process subtree from a Toolhelp snapshot.
+
+    Windows exposes no cheap run state comparable to Linux `/proc` states,
+    so each row shows `-`; the command is the executable name.
+    """
+
+    take_snapshot = snapshot or windows_processes.snapshot_processes
+    probe = probe_process or windows_processes.probe_process
+    creation_times: dict[int, int | None] = {}
+
+    def creation_time(pid: int) -> int | None:
+        """Return `pid`'s creation time, probing each process only once."""
+
+        if pid not in creation_times:
+            creation_times[pid] = probe(pid).creation_filetime
+        return creation_times[pid]
+
+    entries = windows_processes.build_process_tree(
+        root_pid, take_snapshot(), creation_time
+    )
+    now_ticks = (
+        windows_processes.current_filetime() if now_filetime is None else now_filetime
+    )
+    return tuple(
+        WorkerProcess(
+            pid=entry.pid,
+            ppid=entry.ppid,
+            state="-",
+            command=entry.exe_name or str(entry.pid),
+            elapsed_seconds=windows_processes.filetime_age_seconds(
+                creation_time(entry.pid), now_ticks
+            ),
+        )
+        for entry in entries
+    )
+
+
+def collect_process_tree(
+    root_pid: int | None, proc_root: Path | None = None
+) -> tuple[WorkerProcess, ...]:
+    """Return a best-effort process tree rooted at ``root_pid``.
+
+    An explicit ``proc_root`` always reads a `/proc`-style tree. Otherwise
+    Windows uses native process snapshots and POSIX reads `/proc`.
+    """
 
     if root_pid is None:
         return ()
+    if proc_root is None:
+        if _is_windows():
+            return _collect_windows_process_tree(root_pid)
+        proc_root = Path("/proc")
     uptime_seconds = _read_uptime(proc_root)
     processes: dict[int, WorkerProcess] = {}
     children_by_parent: dict[int, list[int]] = {}
@@ -2421,21 +3013,37 @@ def _visible_phase_stack(status: UbersightStatus) -> tuple[PhaseStatus, ...]:
     return status.phases[start:end]
 
 
+# Display state for the operator identity rows, which have no text prefix.
+HOST_STATE = "host"
+
+
+def _operator_identity_lines(
+    status: OperatorLocationStatus, width: int
+) -> tuple[str, str]:
+    """Return the `user@host` row and the network row below it.
+
+    The network row is `WIFI: <ssid>` or, on a cable, `Ethernet (<label>)`.
+    """
+
+    return (
+        _ellipsize(f"{status.username}@{status.hostname}", width),
+        _ellipsize(_network_display_segment(status), width),
+    )
+
+
 def _operator_footer_lines(
     status: OperatorLocationStatus,
     width: int,
     *,
     max_lines_per_status: int = 1,
 ) -> tuple[str, ...]:
-    first = f"{status.hostname}  USER: {status.username}"
-    first += f"  WIFI: {_safe_wifi_display_label(status)}"
     attribution = _operator_location_attribution_suffix(status)
     second = (
         status.location if status.fine_location else f"{status.location}{attribution}"
     )
-    lines = _wrapped_labeled_status_lines(
-        "HOST", first, width, max_lines_per_status
-    ) + _wrapped_labeled_status_lines("LOC", second, width, max_lines_per_status)
+    lines = _operator_identity_lines(status, width) + _wrapped_labeled_status_lines(
+        "LOC", second, width, max_lines_per_status
+    )
     if status.fine_location:
         lines += _wrapped_labeled_status_lines(
             "LOC",
@@ -2453,6 +3061,18 @@ def _safe_wifi_display_label(status: OperatorLocationStatus) -> str:
     if not status.wifi_ssid or status.wifi_ssid == "unknown":
         return "unknown"
     return status.wifi_ssid
+
+
+def _network_display_segment(status: OperatorLocationStatus) -> str:
+    """Return the footer's network segment: the WiFi name, or the wired LAN.
+
+    On a cable the router stands in for an SSID, and the LAN is shown by
+    the LAN name the operator gave it in the location editor.
+    """
+
+    if status.wired:
+        return f"Ethernet ({status.network_label or 'unknown LAN'})"
+    return f"WIFI: {_safe_wifi_display_label(status)}"
 
 
 def _operator_location_attribution_suffix(status: OperatorLocationStatus) -> str:
@@ -2567,12 +3187,14 @@ def _opsec_footer_lines(
     is_public = operator_location is not None and _operator_location_is_public(
         operator_location
     )
+    # Centering only reads as a title inside the alarm's colored band; on
+    # plain routine rows it just looks like stray indentation.
     return _wrapped_labeled_status_lines(
         "OPSEC!" if is_public else "OPSEC",
         OPSEC_PUBLIC_FOOTER_TEXT if is_public else OPSEC_FOOTER_TEXT,
         width,
         max_lines_per_status,
-        center_first=True,
+        center_first=is_public,
     )
 
 
@@ -3012,6 +3634,19 @@ def _draw_once(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replace_unencodable_output(stream: Any = None) -> None:
+    """Replace characters that the snapshot output encoding cannot represent.
+
+    Redirected Windows output defaults to a legacy code page, so a status
+    note with characters outside it would otherwise crash `--once`.
+    """
+
+    target = sys.stdout if stream is None else stream
+    reconfigure = getattr(target, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
+
 def _process_root_from_args(args: argparse.Namespace) -> int | None:
     if args.process_root is not None:
         return args.process_root
@@ -3044,6 +3679,53 @@ def _phase_slice_line_states(status: UbersightStatus, width: int) -> dict[str, s
     return states
 
 
+# Dashboard color pairs as (foreground, background); None is the pane's own
+# background. Dark text on a colored band is never bold: PDCurses, and
+# terminals that render bold as bright, turn bold black into low-contrast
+# grey. Light text may be bold.
+CURSES_COLOR_PAIRS: dict[int, tuple[str, str | None]] = {
+    1: ("CYAN", None),  # phase rows
+    2: ("YELLOW", None),  # active phase or slice
+    3: ("RED", None),  # blocked or failed rows
+    4: ("GREEN", None),  # done rows
+    5: ("BLACK", "GREEN"),  # WORK: SAFE
+    6: ("BLACK", "YELLOW"),  # ORIGIN: OUT-OF-DATE
+    7: ("WHITE", "RED"),  # WORK: CONFLICT and the OPSEC! alarm
+    8: ("BLACK", "CYAN"),  # WORK: CHECK GIT
+    9: ("YELLOW", "BLACK"),  # WORK: PUSH
+    10: ("BLACK", "WHITE"),  # HOST rows and idle data
+    11: ("WHITE", "BLUE"),  # LOC rows
+    12: ("MAGENTA", None),  # routine OPSEC notes
+    13: ("BLACK", "YELLOW"),  # WORK: LOCAL and WORK: PULL
+    14: ("BLACK", "GREEN"),  # Tailscale up and running data
+    15: ("BLACK", "YELLOW"),  # Tailscale down, data errors, form messages
+    16: ("WHITE", "RED"),  # Tailscale logged out
+    17: ("BLACK", "CYAN"),  # Tailscale error
+    18: ("BLACK", "CYAN"),  # hotkey bar and form title
+}
+
+
+def _init_color_pairs(curses_module: Any) -> None:
+    """Register the dashboard color pairs with curses."""
+
+    for pair, (foreground, background) in CURSES_COLOR_PAIRS.items():
+        curses_module.init_pair(
+            pair,
+            getattr(curses_module, f"COLOR_{foreground}"),
+            -1 if background is None else getattr(curses_module, f"COLOR_{background}"),
+        )
+
+
+def _pair_attr(curses_module: Any, pair: int) -> int:
+    """Return a pair's attribute, bold unless its text is dark on a band."""
+
+    foreground, _background = CURSES_COLOR_PAIRS[pair]
+    attr = curses_module.color_pair(pair)
+    if foreground == "BLACK":
+        return attr
+    return attr | curses_module.A_BOLD
+
+
 def _curses_attr_for_line(
     curses_module: Any,
     line: str,
@@ -3053,71 +3735,71 @@ def _curses_attr_for_line(
     if not enable_color:
         return curses_module.A_NORMAL
     if display_state in {"blocked", "failed"}:
-        return curses_module.color_pair(3) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 3)
     if display_state == "active":
-        return curses_module.color_pair(2) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 2)
     if display_state == "done":
         return curses_module.color_pair(4)
     if display_state == "skipped":
         return curses_module.color_pair(8)
+    if display_state == HOST_STATE:
+        return _pair_attr(curses_module, 10)
     if display_state == "pending":
         return curses_module.A_NORMAL
     stripped = line.strip()
     if stripped == _origin_label("synced"):
-        return curses_module.color_pair(5) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 5)
     if stripped == _origin_label("out_of_date"):
-        return curses_module.color_pair(6) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 6)
     if stripped == _origin_label("conflict"):
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped == _origin_label("complicated"):
-        return curses_module.color_pair(8) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 8)
     if stripped == _origin_label("newer"):
-        return curses_module.color_pair(9) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 9)
     if stripped in {"WORK: SAFE, SYNCED", "WORK: SAFE"}:
-        return curses_module.color_pair(5) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 5)
     if stripped in {
         "WORK: UNCOMMITTED LOCAL",
         "WORK: LOCAL",
         "WORK: PULL FIRST",
         "WORK: PULL",
     }:
-        return curses_module.color_pair(13) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 13)
     if stripped in {"WORK: UNPUSHED COMMITS", "WORK: PUSH"}:
-        return curses_module.color_pair(9) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 9)
     if stripped in {"WORK: CONFLICT"}:
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped in {"WORK: CHECK GIT", "WORK: CHECK"}:
-        return curses_module.color_pair(8) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 8)
     if stripped.startswith("OPSEC!:"):
-        return curses_module.color_pair(7) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 7)
     if stripped.startswith("OPSEC:"):
-        return curses_module.color_pair(12) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 12)
     if stripped.startswith("Tailscale:") and stripped.endswith(" UP"):
-        return curses_module.color_pair(14) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 14)
     if stripped.startswith("Tailscale:") and stripped.endswith(" DOWN"):
-        return curses_module.color_pair(15) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 15)
     if stripped == "Tailscale: LOGGED OUT":
-        return curses_module.color_pair(16) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 16)
     if stripped.startswith("Tailscale:"):
-        return curses_module.color_pair(17) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 17)
     if stripped.startswith("DATA") and ("ERROR" in stripped or "INT" in stripped):
-        return curses_module.color_pair(15) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 15)
     if stripped.startswith("DATA") and "IDLE" in stripped:
-        return curses_module.color_pair(10) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 10)
     if stripped.startswith("DATA"):
-        return curses_module.color_pair(14) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 14)
     if stripped.startswith("(R)efresh"):
-        return curses_module.color_pair(18) | curses_module.A_BOLD
-    if line.startswith("HOST:"):
-        return curses_module.color_pair(10) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 18)
     if line.startswith("LOC:"):
-        return curses_module.color_pair(11) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 11)
     if line.startswith("Phase") or line.startswith(" Phase"):
-        return curses_module.color_pair(1) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 1)
     if line.startswith(">"):
-        return curses_module.color_pair(2) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 2)
     if "BLOCKED" in line or "fail" in line:
-        return curses_module.color_pair(3) | curses_module.A_BOLD
+        return _pair_attr(curses_module, 3)
     if "done" in line:
         return curses_module.color_pair(4)
     return curses_module.A_NORMAL
@@ -3144,22 +3826,34 @@ def _line_uses_full_width_background(line: str) -> bool:
             "WORK: CHECK",
         }
         or stripped.startswith("OPSEC!:")
-        or stripped.startswith("OPSEC:")
         or stripped.startswith("Tailscale:")
         or stripped.startswith("DATA")
         or stripped.startswith("(R)efresh")
-        or line.startswith("HOST:")
         or line.startswith("LOC:")
     )
 
 
-def _curses_line_text(line: str, width: int) -> str:
-    """Prepare a rendered row, preserving colored-band background coverage."""
+def _curses_line_text(line: str, width: int, *, band: bool = False) -> str:
+    """Prepare a rendered row, preserving colored-band background coverage.
+
+    `band` marks rows whose band is known from data rather than from a text
+    prefix, such as the operator identity rows.
+    """
 
     text = _clip_preserve_spaces(line, width)
-    if _line_uses_full_width_background(line):
+    if band or _line_uses_full_width_background(line):
         return text.ljust(width)
     return text
+
+
+OPSEC_LEVELS = ("private-trusted", "private", "public", "unknown")
+ENTRY_LAN_NAME = "LAN name"
+ENTRY_PLACE = "Place"
+ENTRY_DETAIL = "Detail"
+ENTRY_OPSEC = "OPSEC"
+ENTRY_THRESHOLD = "Threshold"
+ENTRY_CANCEL = "cancel"
+ENTRY_SAVE = "save"
 
 
 def _location_entry_defaults(
@@ -3177,89 +3871,175 @@ def _location_entry_defaults(
     display = record.get("display")
     if not isinstance(display, dict):
         display = {}
-    label = str(record.get("label", "")).strip()
-    fine_location = str(display.get("fine", "")).strip()
     opsec_level = str(record.get("opsec_level", "")).strip()
-    if opsec_level not in {"private-trusted", "private", "public", "unknown"}:
+    if opsec_level not in OPSEC_LEVELS:
         opsec_level = (
             "public" if _network_is_public(observation.wifi_ssid) else "unknown"
         )
     default_threshold = 100.0 if _network_is_public(observation.wifi_ssid) else 80.0
     threshold = _float_or_none(record.get("confidence_threshold")) or default_threshold
-    identity_parts = []
-    if observation.wifi_bssid:
-        identity_parts.append("WiFi BSSID captured")
-    if observation.gateway_macs:
-        identity_parts.append(f"router MACs captured: {len(observation.gateway_macs)}")
-    if not identity_parts:
-        identity_parts.append("no stable BSSID/router MAC captured")
+    # Offices often share an SSID, so a match on it alone may be another
+    # site's record. Saving then goes by Place name instead of renaming
+    # that record; only an access point or router pins the record.
+    site_specific = match is not None and bool(
+        {"bssid", "gateway"} & set(match.reasons)
+    )
     return LocationEntryDefaults(
-        label=label,
-        fine_location=fine_location,
+        label=str(record.get("label", "")).strip(),
+        fine_location=str(display.get("fine", "")).strip(),
         opsec_level=opsec_level,
         confidence_threshold=threshold,
         matched=bool(record),
         stable_identity=bool(observation.wifi_bssid or observation.gateway_macs),
-        identity_summary=", ".join(identity_parts),
+        lan_name=str(record.get("lan_name", "")).strip(),
+        record_id=str(record.get("id", "")).strip() if site_specific else "",
     )
+
+
+def _location_entry_fields(
+    defaults: LocationEntryDefaults, *, wired: bool
+) -> list[tuple[str, str]]:
+    """Return the editor's fields; a wired network also gets a LAN name."""
+
+    fields = [(ENTRY_LAN_NAME, defaults.lan_name)] if wired else []
+    return fields + [
+        (ENTRY_PLACE, defaults.label),
+        (ENTRY_DETAIL, defaults.fine_location),
+        (ENTRY_OPSEC, defaults.opsec_level),
+        (ENTRY_THRESHOLD, f"{defaults.confidence_threshold:g}"),
+    ]
+
+
+def _location_entry_header(
+    observation: location_memory.LocationObservation,
+    defaults: LocationEntryDefaults,
+) -> tuple[str, list[str]]:
+    """Return the editor title and the network, help, and status rows.
+
+    Raw router and access-point addresses are shown here for the operator
+    to recognize; location memory matches on their salted hashes.
+    """
+
+    routers = ", ".join(observation.gateway_macs)
+    if observation.wired:
+        title = "NAME THIS NETWORK"
+        rows = [
+            f"Wired LAN via router {routers}",
+            f"Subnet: {', '.join(observation.local_subnets) or 'unknown'}",
+        ]
+    else:
+        title = "NAME THIS LOCATION"
+        if observation.wifi_ssid != "unknown":
+            rows = [
+                f"WiFi: {observation.wifi_ssid}",
+                f"Access point: {observation.wifi_bssid or 'not captured'}",
+            ]
+        else:
+            rows = ["WiFi name not available"]
+        if routers:
+            rows.append(f"Router: {routers}")
+    rows += ["Up/Down: field  Left/Right: OPSEC", "Enter: save  Esc: cancel"]
+    if not defaults.stable_identity:
+        rows.append("No access point or router captured; cannot save.")
+    elif defaults.matched:
+        rows.append("Editing the saved record for this network.")
+    return title, rows
+
+
+def _cycle_opsec(value: str, step: int) -> str:
+    """Return the OPSEC level `step` places from `value`, wrapping around."""
+
+    index = OPSEC_LEVELS.index(value) if value in OPSEC_LEVELS else -1
+    return OPSEC_LEVELS[(index + step) % len(OPSEC_LEVELS)]
+
+
+def _apply_location_entry_key(
+    fields: list[tuple[str, str]],
+    active_index: int,
+    key: Any,
+    curses_module: Any,
+) -> tuple[list[tuple[str, str]], int, str | None]:
+    """Apply one key to the editor form.
+
+    Returns the updated fields, the active field index, and an action:
+    `save`, `cancel`, or None. Keys come from `get_wch` (strings for
+    characters) or `getch` (integer codes). Only Esc cancels, so every
+    printable character, including `q`, can be typed. The OPSEC field
+    cycles through its fixed levels instead of accepting text.
+    """
+
+    def code(name: str) -> Any:
+        """Return a curses key code, or None where this curses lacks it."""
+
+        return getattr(curses_module, name, None)
+
+    if key in ("\x1b", 27):
+        return fields, active_index, ENTRY_CANCEL
+    if key in ("\n", "\r", 10, 13, code("KEY_ENTER"), code("KEY_F2")):
+        return fields, active_index, ENTRY_SAVE
+    if key in (code("KEY_UP"), code("KEY_BTAB")):
+        return fields, (active_index - 1) % len(fields), None
+    if key in (code("KEY_DOWN"), "\t", 9):
+        return fields, (active_index + 1) % len(fields), None
+    label, value = fields[active_index]
+    updated = list(fields)
+    if label == ENTRY_OPSEC:
+        if key == code("KEY_LEFT"):
+            updated[active_index] = (label, _cycle_opsec(value, -1))
+        elif key in (code("KEY_RIGHT"), " "):
+            updated[active_index] = (label, _cycle_opsec(value, 1))
+        return updated, active_index, None
+    if key in (code("KEY_BACKSPACE"), "\b", "\x7f", 8, 127):
+        updated[active_index] = (label, value[:-1])
+    elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+        updated[active_index] = (label, value + key)
+    elif isinstance(key, int) and 32 <= key <= 126:
+        updated[active_index] = (label, value + chr(key))
+    return updated, active_index, None
 
 
 def _draw_location_entry_form(
     stdscr: Any,
     curses_module: Any,
     *,
+    title: str,
+    rows: Sequence[str],
     fields: list[tuple[str, str]],
     active_index: int,
     message: str,
-    defaults: LocationEntryDefaults,
-    observation: location_memory.LocationObservation,
     enable_color: bool,
 ) -> None:
     """Draw the local-memory editor page."""
 
     height, width = stdscr.getmaxyx()
     stdscr.erase()
-    attr_title = (
-        curses_module.color_pair(18) | curses_module.A_BOLD
-        if enable_color
-        else curses_module.A_BOLD
-    )
-    stdscr.addstr(0, 0, _curses_line_text("ENTER LOCATION", width - 1), attr_title)
-    rows = [
-        "Edit local-only memory for this network.",
-        f"SSID: {observation.wifi_ssid}",
-        defaults.identity_summary,
-        "Tab/Up/Down: field  Enter/F2: save  Esc: cancel",
-    ]
-    if not defaults.stable_identity:
-        rows.append("Cannot save until a BSSID or router MAC is captured.")
-    if defaults.matched:
-        rows.append("Existing local record matched; save updates that label.")
-    for index, row in enumerate(rows, start=2):
-        if index >= height - 1:
+    attr_title = _pair_attr(curses_module, 18) if enable_color else curses_module.A_BOLD
+    stdscr.addstr(0, 0, _curses_line_text(title, width - 1, band=True), attr_title)
+    y = 2
+    for row in rows:
+        if y >= height - 1:
             break
-        stdscr.addstr(index, 0, _ellipsize(row, width - 1))
-    start_y = min(8, max(5, len(rows) + 3))
+        stdscr.addstr(y, 0, _ellipsize(row, width - 1))
+        y += 1
+    y += 1
+    label_width = max(len(label) for label, _ in fields) + 1
     for offset, (label, value) in enumerate(fields):
-        y = start_y + offset * 2
-        if y >= height - 2:
+        if y >= height - 1:
             break
         marker = ">" if offset == active_index else " "
-        row = f"{marker}{label}: {value}"
+        shown = f"< {value} >" if label == ENTRY_OPSEC else value
+        row = f"{marker}{label + ':':<{label_width}} {shown}"
         attr = (
             curses_module.A_BOLD if offset == active_index else curses_module.A_NORMAL
         )
         stdscr.addstr(y, 0, _ellipsize(row, width - 1), attr)
+        y += 1
     if message and height >= 2:
         stdscr.addstr(
             height - 1,
             0,
-            _curses_line_text(message, width - 1),
-            (
-                curses_module.color_pair(15) | curses_module.A_BOLD
-                if enable_color
-                else curses_module.A_BOLD
-            ),
+            _curses_line_text(message, width - 1, band=True),
+            (_pair_attr(curses_module, 15) if enable_color else curses_module.A_BOLD),
         )
     stdscr.refresh()
 
@@ -3269,33 +4049,53 @@ def _save_location_entry(
     observation: location_memory.LocationObservation,
     *,
     memory_path: Path,
+    record_id: str = "",
 ) -> str:
-    """Validate and save one local-memory editor form."""
+    """Validate and save one editor form; return an error message or "".
+
+    A wired form saves its LAN name too. When only the LAN is named, the
+    place takes the LAN's name.
+    """
 
     values = {label: value.strip() for label, value in fields}
-    label = values.get("Label", "")
-    fine_location = values.get("Fine location", "")
-    opsec_level = values.get("OPSEC", "")
-    threshold = _float_or_none(values.get("Threshold"))
-    if not label:
-        return "Label is required."
+    lan_name = values.get(ENTRY_LAN_NAME)
+    place = values.get(ENTRY_PLACE, "") or (lan_name or "")
+    opsec_level = values.get(ENTRY_OPSEC, "")
+    threshold = _float_or_none(values.get(ENTRY_THRESHOLD))
+    if not place:
+        return "Name the place (or the LAN) before saving."
     if not observation.wifi_bssid and not observation.gateway_macs:
-        return "No BSSID/router MAC captured; cannot save."
-    if opsec_level not in {"private-trusted", "private", "public", "unknown"}:
+        return "No access point or router captured; cannot save."
+    if opsec_level not in OPSEC_LEVELS:
         return "OPSEC must be private-trusted, private, public, or unknown."
-    if threshold is None or threshold <= 0:
+    # `nan` and `inf` parse as floats, but a record with either never matches.
+    if threshold is None or not math.isfinite(threshold) or threshold <= 0:
         return "Threshold must be a positive number."
     location_memory.learn_location_memory(
-        label,
-        fine_location=fine_location,
+        place,
+        fine_location=values.get(ENTRY_DETAIL, ""),
         opsec_level=opsec_level,
         confidence_threshold=threshold,
         observation=observation,
         memory_path=memory_path,
         salt_path=DEFAULT_LOCATION_MEMORY_SALT_PATH,
         include_geo=observation.network_estimate is not None,
+        lan_name=lan_name,
+        record_id=record_id or None,
     )
     return ""
+
+
+def _read_entry_key(stdscr: Any, curses_module: Any) -> Any:
+    """Read one key, preferring `get_wch` so non-ASCII names can be typed."""
+
+    get_wch = getattr(stdscr, "get_wch", None)
+    if get_wch is None:
+        return stdscr.getch()
+    try:
+        return get_wch()
+    except curses_module.error:
+        return -1
 
 
 def _run_location_entry_page(
@@ -3305,7 +4105,7 @@ def _run_location_entry_page(
     *,
     enable_color: bool,
 ) -> bool:
-    """Run the interactive local-memory editor page."""
+    """Run the interactive location-memory editor; return True after a save."""
 
     observation = observe_operator_location(
         geolocate=not args.no_geolocate,
@@ -3313,12 +4113,8 @@ def _run_location_entry_page(
     )
     memory_path = Path(args.location_memory)
     defaults = _location_entry_defaults(observation, memory_path=memory_path)
-    fields = [
-        ("Label", defaults.label),
-        ("Fine location", defaults.fine_location),
-        ("OPSEC", defaults.opsec_level),
-        ("Threshold", f"{defaults.confidence_threshold:g}"),
-    ]
+    title, rows = _location_entry_header(observation, defaults)
+    fields = _location_entry_fields(defaults, wired=observation.wired)
     active_index = 0
     message = ""
     stdscr.nodelay(False)
@@ -3327,46 +4123,185 @@ def _run_location_entry_page(
             _draw_location_entry_form(
                 stdscr,
                 curses_module,
+                title=title,
+                rows=rows,
                 fields=fields,
                 active_index=active_index,
                 message=message,
-                defaults=defaults,
-                observation=observation,
                 enable_color=enable_color,
             )
-            key = stdscr.getch()
-            if key in (27, ord("q"), ord("Q")):
+            key = _read_entry_key(stdscr, curses_module)
+            if key == getattr(curses_module, "KEY_RESIZE", None):
+                _adopt_terminal_resize(curses_module)
+                continue
+            fields, active_index, action = _apply_location_entry_key(
+                fields, active_index, key, curses_module
+            )
+            if action == ENTRY_CANCEL:
                 return False
-            if key in (curses_module.KEY_UP,):
-                active_index = (active_index - 1) % len(fields)
-                continue
-            if key in (curses_module.KEY_DOWN, 9):
-                active_index = (active_index + 1) % len(fields)
-                continue
-            if key in (curses_module.KEY_F2, 10, 13):
+            if action == ENTRY_SAVE:
                 message = _save_location_entry(
                     fields,
                     observation,
                     memory_path=memory_path,
+                    record_id=defaults.record_id,
                 )
                 if not message:
                     return True
-                continue
-            label, value = fields[active_index]
-            if key in (curses_module.KEY_BACKSPACE, 127, 8):
-                fields[active_index] = (label, value[:-1])
-                continue
-            if 32 <= key <= 126:
-                fields[active_index] = (label, value + chr(key))
     finally:
         stdscr.nodelay(True)
 
 
+def _adopt_terminal_resize(curses_module: Any) -> None:
+    """Make curses adopt a new terminal size after `KEY_RESIZE`.
+
+    ncurses updates its screen size before delivering `KEY_RESIZE`. PDCurses,
+    used by `windows-curses`, keeps the old size until `resize_term(0, 0)`
+    asks it to read the console size again.
+    """
+
+    if _is_windows():
+        resize_term = getattr(curses_module, "resize_term", None)
+        if resize_term is not None:
+            resize_term(0, 0)
+
+
+class RestartSignal:
+    """Restart requests delivered to a live dashboard by `ubersight-stop`.
+
+    Windows uses a named event in the logon session. POSIX catches `SIGTERM`,
+    so a request leaves curses through its normal cleanup instead of killing
+    the process with the terminal still in curses mode.
+    """
+
+    def __init__(self) -> None:
+        """Start unrequested and not yet listening; see `install`."""
+
+        self._requested = False
+        self._event: windows_processes.RestartEvent | None = None
+        self._previous_handler: Any = None
+        self._installed_handler = False
+
+    def install(self) -> None:
+        """Start accepting restart requests for this process."""
+
+        if _is_windows():
+            self._event = windows_processes.RestartEvent.create()
+            return
+        self._previous_handler = signal.signal(signal.SIGTERM, self._on_sigterm)
+        self._installed_handler = True
+
+    def _on_sigterm(self, signum: int, frame: Any) -> None:
+        """Record a POSIX restart request without interrupting curses."""
+
+        self._requested = True
+
+    def requested(self) -> bool:
+        """Return whether a restart has been requested."""
+
+        if self._requested:
+            return True
+        if self._event is not None and self._event.is_set():
+            self._requested = True
+        return self._requested
+
+    def close(self) -> None:
+        """Stop accepting restart requests and restore the previous state."""
+
+        if self._event is not None:
+            self._event.close()
+            self._event = None
+        if self._installed_handler:
+            signal.signal(signal.SIGTERM, self._previous_handler)
+            self._installed_handler = False
+
+
+def _supervisor_log(message: str) -> None:
+    """Print one supervisor notice to standard error."""
+
+    print(f"[ubersight-supervise] {message}", file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def _child_owns_ctrl_c() -> Iterator[None]:
+    """Let the supervised dashboard alone handle Ctrl+C on POSIX.
+
+    Ctrl+C reaches the supervisor and the dashboard together. Unhandled,
+    the supervisor's `subprocess.run` would kill the dashboard 0.25 s later,
+    possibly before curses restores the terminal. A do-nothing handler,
+    unlike `SIG_IGN`, is reset when the child starts, so the dashboard
+    still gets its KeyboardInterrupt, exits 130, and ends supervision.
+    Windows waits are not interrupted this way, so Windows is unchanged.
+    """
+
+    # Only the main thread may install signal handlers.
+    if _is_windows() or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def run_supervised(
+    child_args: Sequence[str],
+    *,
+    run: Any = subprocess.run,
+    sleep: Any = time.sleep,
+    log: Any = _supervisor_log,
+) -> int:
+    """Keep the dashboard running in this terminal until the operator quits.
+
+    The child shares the terminal. A restart request (status 75) restarts it
+    at once; Q (status 0) and Ctrl+C end supervision; any other exit, such
+    as a crash while code is being edited, restarts after a short delay.
+    """
+
+    command = [sys.executable, "-m", "ubersight", *child_args]
+    interrupted = {KEYBOARD_INTERRUPT_EXIT_CODE, WINDOWS_CONTROL_C_EXIT}
+    if hasattr(signal, "SIGINT"):
+        interrupted.add(-signal.SIGINT)
+    while True:
+        try:
+            with _child_owns_ctrl_c():
+                completed = run(command, check=False)
+        except KeyboardInterrupt:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+        status = completed.returncode
+        if status == 0:
+            return 0
+        if status in interrupted:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+        if status == RESTART_EXIT_CODE:
+            log("restart requested; restarting Ubersight.")
+            continue
+        log(
+            f"Ubersight exited with status {status}; restarting in "
+            f"{SUPERVISOR_CRASH_DELAY_SECONDS:g}s. Press Ctrl+C to stop."
+        )
+        try:
+            sleep(SUPERVISOR_CRASH_DELAY_SECONDS)
+        except KeyboardInterrupt:
+            return KEYBOARD_INTERRUPT_EXIT_CODE
+
+
 def _run_curses(args: argparse.Namespace) -> int:
+    """Run the live dashboard and return its exit status.
+
+    Returns 0 when the operator quits, `RESTART_EXIT_CODE` when
+    `ubersight-stop` requests a restart, and `KEYBOARD_INTERRUPT_EXIT_CODE`
+    after Ctrl+C.
+    """
+
     try:
         import curses
     except ImportError as exc:
         raise SystemExit(f"curses is unavailable: {exc}") from exc
+
+    restart = RestartSignal()
+    outcome = {"status": 0}
 
     def loop(stdscr: Any) -> None:
         curses.curs_set(0)
@@ -3375,27 +4310,13 @@ def _run_curses(args: argparse.Namespace) -> int:
         if enable_color:
             curses.start_color()
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_YELLOW, -1)
-            curses.init_pair(3, curses.COLOR_RED, -1)
-            curses.init_pair(4, curses.COLOR_GREEN, -1)
-            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_GREEN)
-            curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-            curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_RED)
-            curses.init_pair(8, curses.COLOR_RED, curses.COLOR_CYAN)
-            curses.init_pair(9, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-            curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
-            curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_BLUE)
-            curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_MAGENTA)
-            curses.init_pair(13, curses.COLOR_BLUE, curses.COLOR_YELLOW)
-            curses.init_pair(14, curses.COLOR_BLACK, curses.COLOR_GREEN)
-            curses.init_pair(15, curses.COLOR_BLACK, curses.COLOR_YELLOW)
-            curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_RED)
-            curses.init_pair(17, curses.COLOR_RED, curses.COLOR_CYAN)
-            curses.init_pair(18, curses.COLOR_WHITE, curses.COLOR_CYAN)
+            _init_color_pairs(curses)
         refresh_seconds = max(0.1, args.refresh_ms / 1000.0)
         force_refresh = False
         while True:
+            if restart.requested():
+                outcome["status"] = RESTART_EXIT_CODE
+                return
             height, width = stdscr.getmaxyx()
             status = load_status(Path(args.status))
             workers = collect_process_tree(_process_root_from_args(args))
@@ -3441,12 +4362,21 @@ def _run_curses(args: argparse.Namespace) -> int:
                 height=height,
                 stale_seconds=args.stale_seconds,
             )
-            phase_slice_states = _phase_slice_line_states(status, width)
+            line_states = _phase_slice_line_states(status, width)
+            if operator_location is not None:
+                for identity_line in _operator_identity_lines(
+                    operator_location, max(20, width)
+                ):
+                    line_states[identity_line] = HOST_STATE
             stdscr.erase()
             for y, line in enumerate(lines[:height]):
                 if width <= 1:
                     continue
-                text = _curses_line_text(line, width - 1)
+                text = _curses_line_text(
+                    line,
+                    width - 1,
+                    band=line_states.get(line) == HOST_STATE,
+                )
                 stdscr.addstr(
                     y,
                     0,
@@ -3455,15 +4385,21 @@ def _run_curses(args: argparse.Namespace) -> int:
                         curses,
                         line,
                         enable_color,
-                        phase_slice_states.get(line),
+                        line_states.get(line),
                     ),
                 )
             stdscr.refresh()
             deadline = time.monotonic() + refresh_seconds
             while time.monotonic() < deadline:
+                if restart.requested():
+                    outcome["status"] = RESTART_EXIT_CODE
+                    return
                 key = stdscr.getch()
                 if key in (ord("q"), ord("Q"), 27):
                     return
+                if key == curses.KEY_RESIZE:
+                    _adopt_terminal_resize(curses)
+                    break
                 if key in (ord("r"), ord("R")):
                     force_refresh = True
                     break
@@ -3478,8 +4414,15 @@ def _run_curses(args: argparse.Namespace) -> int:
                     break
                 time.sleep(0.05)
 
-    curses.wrapper(loop)
-    return 0
+    restart.install()
+    try:
+        curses.wrapper(loop)
+    except KeyboardInterrupt:
+        # curses.wrapper has already restored the terminal; exit quietly.
+        return KEYBOARD_INTERRUPT_EXIT_CODE
+    finally:
+        restart.close()
+    return outcome["status"]
 
 
 def _status_from_args(args: argparse.Namespace) -> UbersightStatus:
@@ -3543,8 +4486,11 @@ def _normalized_status_for_write(status: UbersightStatus) -> UbersightStatus:
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser for Ubersight and status-writer modes."""
 
+    # No abbreviations: `--sup` would turn on supervision without matching
+    # the literal `--supervise` that `main` removes from the child's
+    # arguments, so every child would start another supervisor.
     parser = argparse.ArgumentParser(
-        description="Run Ubersight in a terminal side pane."
+        description="Run Ubersight in a terminal side pane.", allow_abbrev=False
     )
     parser.add_argument(
         "--status", default=str(DEFAULT_STATUS_PATH), help="agent status JSON path"
@@ -3647,9 +4593,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--background-job-dir",
         default=None,
         help=(
-            "background-job status directory; default is derived from "
-            "--project-name as XDG_RUNTIME_DIR/ubersight/<project>/"
-            "background-jobs"
+            "background-job status directory; default on POSIX is derived "
+            "from --project-name as XDG_RUNTIME_DIR/ubersight/<project>/"
+            "background-jobs, and on Windows is "
+            r".local\ubersight\background-jobs in the current directory"
         ),
     )
     parser.add_argument(
@@ -3676,6 +4623,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stale-seconds", type=int, default=900, help="age threshold for stale status"
+    )
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help=(
+            "keep the dashboard running: restart it after ubersight-stop "
+            "requests and crashes; Q or Ctrl+C ends supervision"
+        ),
     )
 
     writer = parser.add_argument_group("status writer")
@@ -3717,10 +4672,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run Ubersight or write one status snapshot."""
 
+    harden_windows_executable_search()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_args)
     if args.codex_pid is not None and args.process_root is not None:
         parser.error("--codex-pid and --process-root are aliases; provide only one")
+    if args.supervise:
+        if args.once or args.write_status:
+            parser.error("--supervise cannot be combined with --once or --write-status")
+        return run_supervised([arg for arg in raw_args if arg != "--supervise"])
     if args.background_job_dir is None:
         args.background_job_dir = str(background_job_dir(args.project_name))
     if args.write_status:
@@ -3732,6 +4693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[ubersight] wrote {args.status}")
         return 0
     if args.once:
+        _replace_unencodable_output()
         return _draw_once(args)
     return _run_curses(args)
 

@@ -11,12 +11,14 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
-import os
+import math
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
+
+from .atomic_files import atomic_write_text
 
 DEFAULT_LOCATION_MEMORY_PATH = Path(".local/operator-location/known-locations.json")
 DEFAULT_LOCATION_OBSERVATIONS_PATH = Path(".local/operator-location/observations.jsonl")
@@ -38,6 +40,9 @@ class LocationObservation:
     gateway_macs: tuple[str, ...] = ()
     network_estimate: Any | None = None
     observed_at: datetime | None = None
+    # True only when the WiFi probe affirmatively found no WLAN connection
+    # while a default gateway was reachable: the operator is on a cable.
+    wired: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,33 +125,23 @@ def load_network_profiles(path: Path) -> list[dict[str, Any]]:
 def write_location_memory(path: Path, records: Sequence[dict[str, Any]]) -> None:
     """Atomically write local-only known-location records."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": LOCATION_MEMORY_SCHEMA,
         "updated_at": local_now().isoformat(timespec="seconds"),
         "locations": list(records),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(tmp_path, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_network_profiles(path: Path, records: Sequence[dict[str, Any]]) -> None:
     """Atomically write local-only network trait profiles."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": NETWORK_PROFILES_SCHEMA,
         "updated_at": local_now().isoformat(timespec="seconds"),
         "networks": list(records),
     }
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(tmp_path, path)
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def load_location_memory_salt(path: Path, *, create: bool = False) -> str:
@@ -208,6 +203,7 @@ def observation_to_mapping(observation: LocationObservation) -> dict[str, Any]:
         "wifi_bssid": observation.wifi_bssid,
         "local_subnets": list(observation.local_subnets),
         "gateway_macs": list(observation.gateway_macs),
+        "wired": observation.wired,
         "network_estimate": network_estimate_to_mapping(observation.network_estimate),
     }
 
@@ -387,8 +383,17 @@ def learn_location_memory(
     memory_path: Path = DEFAULT_LOCATION_MEMORY_PATH,
     salt_path: Path = DEFAULT_LOCATION_MEMORY_SALT_PATH,
     include_geo: bool = True,
+    lan_name: str | None = None,
+    record_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create or update a local-only known-location record."""
+    """Create or update a local-only known-location record.
+
+    With `record_id`, that record is updated even when its label changes,
+    so renaming a place in the editor never duplicates it. Without one,
+    the record is found by label, as the command-line helper expects.
+    `lan_name` names a wired LAN, shown as `Ethernet (<name>)`; None leaves
+    it unchanged and an empty string clears it.
+    """
 
     label = label.strip()
     if not label:
@@ -396,14 +401,20 @@ def learn_location_memory(
     salt = load_location_memory_salt(salt_path, create=True)
     records = load_location_memory(memory_path)
     now = local_now().isoformat(timespec="seconds")
-    record = next(
-        (
-            item
-            for item in records
-            if str(item.get("label", "")).casefold() == label.casefold()
-        ),
-        None,
-    )
+    if record_id:
+        record = next(
+            (item for item in records if str(item.get("id", "")) == record_id),
+            None,
+        )
+    else:
+        record = next(
+            (
+                item
+                for item in records
+                if str(item.get("label", "")).casefold() == label.casefold()
+            ),
+            None,
+        )
     if record is None:
         record = {
             "id": secrets.token_hex(16),
@@ -414,9 +425,12 @@ def learn_location_memory(
     record["label"] = label
     record["updated_at"] = now
     record["opsec_level"] = opsec_level.strip() or "private-trusted"
+    if lan_name is not None:
+        record["lan_name"] = lan_name.strip()
     if confidence_threshold is not None:
-        if confidence_threshold <= 0:
-            raise ValueError("confidence threshold must be greater than zero")
+        # NaN and infinity pass `<= 0` but would stop the record matching.
+        if not math.isfinite(confidence_threshold) or confidence_threshold <= 0:
+            raise ValueError("confidence threshold must be a positive number")
         record["confidence_threshold"] = confidence_threshold
     record["display"] = {
         "coarse": label,

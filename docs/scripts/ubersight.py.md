@@ -44,8 +44,20 @@ In live mode, Ubersight exposes a local hotkey bar:
 
 - `R`: force-refresh Git, local network, geolocation, Tailscale, process, and
   background-job status on the next draw.
-- `E`: open the local-only location-memory editor for the current network
-  BSSID or gateway/router MAC.
+- `E`: open the local-only location-memory editor for the current network.
+  - **On WiFi**, it shows the network and access point, and you name the
+    Place.
+  - **On Ethernet**, it shows the router's MAC address and subnet, and you
+    name both the LAN, shown as `Ethernet (<name>)`, and the Place.
+  - **Fields:** Detail adds a finer location. OPSEC cycles with Left/Right
+    or Space. Threshold sets the match confidence.
+  - **Keys:** Up/Down or Tab moves between fields, Enter saves, and Esc
+    cancels. Every printable character can be typed, including `q`.
+
+  Saving updates the record that matched the current network by access
+  point or router, so renaming a place never duplicates it. A match on the
+  WiFi name alone, which several sites may share, saves by Place name
+  instead, so naming a second office never renames the first.
 - `Q`: quit Ubersight.
 
 Print a one-shot text snapshot, useful for tests or log capture:
@@ -101,7 +113,8 @@ Known operator-location memory lives in a separate ignored local tree:
 .local/operator-location/match-salt
 ```
 
-Runtime background-job status lives outside the checkout by default:
+On POSIX hosts, runtime background-job status lives outside the checkout by
+default:
 
 ```text
 $XDG_RUNTIME_DIR/ubersight/<project-name>/background-jobs
@@ -119,10 +132,19 @@ If no per-user runtime directory is available, scripts fall back to:
 /tmp/ubersight-$UID/<project-name>/background-jobs
 ```
 
+On native Windows, project-scoped runtime state stays under the project's
+ignored `.local/` tree. The default background-job directory is relative to
+the working directory, like the other defaults:
+
+```text
+.local/ubersight/background-jobs
+```
+
 The default project name is the final path component of the current working
-directory. Use `--project-name NAME` to select a different Ubersight runtime
-context. Obsolete pre-Ubersight status files are not part of the current
-protocol.
+directory. On POSIX, `--project-name NAME` selects a different Ubersight
+runtime context. On Windows the project-local directory already identifies
+the project, so `--project-name` changes only the banner. Obsolete
+pre-Ubersight status files are not part of the current protocol.
 
 ## Important Options
 
@@ -161,6 +183,9 @@ protocol.
 - `--width N --height N`: geometry for `--once` snapshots. Defaults to 40x40.
 - `--stale-seconds N`: mark status stale after this age.
 - `--write-status`: write status JSON and exit.
+- `--supervise`: keep the dashboard running. It restarts after
+  `ubersight-stop` requests and after crashes; Q or Ctrl+C ends
+  supervision.
 
 Phase rows passed to `--phase-row` use:
 
@@ -315,6 +340,19 @@ the file and may remove it. Completed background-job files are also removed
 after Ubersight observes them, because the footer represents active work
 rather than completed history.
 
+The start-ticks value depends on the platform:
+
+- **Linux:** field 22 of `/proc/<pid>/stat`, counted from boot, so writers
+  also record `boot_id`.
+- **Windows:** the process creation time as a decimal count of
+  100-nanosecond intervals since 1601-01-01 UTC (a `FILETIME`). That value
+  is unique across boots, so Windows ignores `boot_id`. A PowerShell writer
+  can record it with `(Get-Process -Id $PID).StartTime.ToFileTimeUtc()`, and
+  .NET code with `Process.StartTime.ToFileTimeUtc()`.
+
+When Windows refuses to let Ubersight inspect the recorded process, it
+keeps the file rather than risk deleting status for a live job.
+
 The data area uses three footer rows:
 
 - ticker row: a slowly scrolling verbose description of all active jobs;
@@ -359,7 +397,9 @@ operation blocks. By default, refresh runs `git fetch --quiet origin` before
 comparing the current branch with its upstream. Git subprocesses disable
 terminal prompts and use SSH batch mode with a short connect timeout, so a
 hostile or captive network should degrade to `WORK: CHECK GIT` instead of
-blocking the side-window display.
+blocking the side-window display. They also run with `GIT_OPTIONAL_LOCKS=0`,
+so the dashboard's frequent `git status` checks never hold `.git/index.lock`
+while the operator or an agent stages or commits.
 
 Location status separates cheap local network observation from public
 geolocation. By default, local hostname, username, WiFi SSID, and related
@@ -408,14 +448,20 @@ fixture SSID such as `Example Venue Guest WiFi` plus `Example City, Example
 Region, Example Country` to resolve to a likely venue such as `Example Venue,
 Example City, Example Region, Example Country`.
 
-WiFi detection uses three live inspection tiers before giving up: active
-NetworkManager scan SSIDs, NetworkManager connection literals, and wireless
-tool inspection through `iwgetid`, `iw`, or `iwconfig`. The active scan SSID
+WiFi detection uses four live inspection tiers before giving up: active
+NetworkManager scan SSIDs, NetworkManager connection literals, wireless
+tool inspection through `iwgetid`, `iw`, or `iwconfig`, and, on Windows,
+`netsh wlan show interfaces`. The active scan SSID
 is preferred because connection profile names may be operator-defined and can
 lag the actual network after a network change. If those all fail,
 Ubersight reuses the last cached SSID literal when one is available, so a
 temporary desktop/session inspection failure does not immediately degrade the
-internal location match to `unknown`. A failed live inspection does not mark
+internal location match to `unknown`. A wired connection is the exception,
+since the cable explains the missing SSID. On a cable, the footer shows
+`Ethernet (<LAN name>)` instead of `WIFI:`. Windows recognizes the cable when
+`netsh` reports no WLAN connection; Linux reads `/sys/class/net`, and counts
+a physical Ethernet NIC, or a bridge or VLAN on one, but not a virtual
+machine's paravirtual NIC. A failed live inspection does not mark
 the cached SSID as freshly observed; Ubersight will keep retrying the local
 network probe instead of treating stale fallback data as proof that the
 operator has not moved.
@@ -455,7 +501,8 @@ tracked prose.
 ## Side Effects and Safety Boundaries
 
 Ubersight reads the status JSON file, local cache files, Git branch state,
-and optionally `/proc` process metadata. In `--write-status` mode, it writes
+and optionally process metadata: `/proc` on Linux, or read-only Win32
+process queries on Windows. In `--write-status` mode, it writes
 only the configured status path. In display mode, it may update origin,
 location, and Tailscale cache files under `.local/ubersight/`, and it may
 append local location observations under `.local/operator-location/`. Local
@@ -477,18 +524,55 @@ Its tracked documentation is in
 
 ## Restarting the Side Pane
 
-When the wrapper is running, agents should restart visible Ubersight after
-visual rendering changes by running:
+Run the side pane under the supervisor, on any platform:
+
+```bash
+ubersight --supervise
+```
+
+`ubersight-autosplit` starts its dashboard pane this way. The supervisor
+handles each exit differently:
+
+- After a restart request, it restarts the dashboard immediately.
+- After a crash, for example while code is being edited, it restarts the
+  dashboard after one second.
+- When you press Q or Ctrl+C, it exits.
+
+After visual rendering changes, or after reinstalling Ubersight, agents
+restart every visible dashboard by running:
 
 ```bash
 ubersight-stop
 ```
 
-The compatibility helper `scripts/stop_ubersight.py` runs the same command
-from a source checkout. The helper finds same-user `ubersight.py` processes,
-sends `SIGTERM`, and lets `scripts/ubersight_wrapper.sh` restart Ubersight.
 It exists so the operator can preauthorize one stable command rather than
-approving ad hoc `kill` or `pkill` process IDs.
+approving ad hoc `kill` or `pkill` process IDs. The compatibility helper
+`scripts/stop_ubersight.py` runs the same command from a source checkout.
+
+How it works:
+
+- **Restart requests:** the helper asks every same-user dashboard to
+  restart. Each dashboard leaves curses cleanly and exits with status 75,
+  and its supervisor starts it again with the new code. An unsupervised
+  dashboard just exits.
+- **Finding dashboards on Windows:** each dashboard exposes a named
+  restart event in the logon session. The helper therefore reaches the
+  operator's dashboards even from a sandboxed agent session.
+- **Finding dashboards on POSIX:** the helper finds dashboard processes
+  in `/proc` and sends `SIGTERM`, which the dashboard treats as a restart
+  request. A dashboard is `python -m ubersight` or an interpreter running
+  `ubersight` or `ubersight.py`. Supervisors, `--once` and
+  `--write-status` runs, and editors or linters that merely open
+  `ubersight.py` are never matched.
+- **Waiting and exit status:** the helper waits up to `--wait-seconds`
+  (default 5). It exits with status 1 if any dashboard is still running.
+  `--force` then ends those dashboards, checking each process's identity
+  first so that a reused process ID is not killed; a process whose
+  identity could not be read is left alone. `--dry-run` lists the matches
+  without signaling them.
+
+The older `scripts/ubersight_wrapper.sh` still works on POSIX. It restarts
+after any exit, including Q.
 
 ## Provider Diagnostics
 
@@ -515,9 +599,72 @@ Use `--provider nominatim` or `--provider overpass` to narrow a run, `--json`
 for machine-readable output, and `--dry-run` to see generated queries without
 contacting network providers.
 
+## Windows
+
+Ubersight runs natively on Windows 11 in Windows Terminal or the classic
+console host. Windows support was delivered in roadmap Phase 11. See
+`docs/specifications/windows-platform-support.md` for the details.
+
+### Terminal library
+
+The standard Windows CPython build has no `curses`. On Windows, Ubersight
+installs `windows-curses` (PDCurses) automatically as a platform-specific
+dependency. That dependency is temporary until the planned Expletives
+terminal-library port.
+
+### Running it
+
+Install it once from the checkout with `.\install.ps1`. That puts
+`ubersight.exe` and the other commands in `~\.local\bin` and adds that
+directory to your user PATH if needed. After that, run `ubersight` from
+any project directory.
+
+Keep the leading `.\` on relative paths. Without it, PowerShell reads
+`.venv\Scripts\ubersight` as a command inside a module named `.venv`.
+
+To open it as a narrow side pane in the current Windows Terminal window:
+
+```powershell
+wt -w 0 split-pane -V -s 0.3 -d "$PWD" ubersight
+```
+
+Run it from Windows Terminal or the console host, not mintty, so curses
+gets a real console.
+
+### Where files go
+
+- **Project-scoped runtime state** stays under the project's ignored
+  `.local/` tree.
+- **Cross-project state** belongs under `%LOCALAPPDATA%\ubersight`. Use that
+  root only for material that must be visible across and between projects.
+  Nothing uses it today.
+
+### Process inspection
+
+Ubersight inspects processes through standard-library `ctypes` calls into
+`kernel32`, so the `windows-curses` dependency is the only addition.
+`--process-root` shows executable names rather than full command lines. On
+Windows the run-state column shows `-`.
+
+If that inspection proves fragile, or full command lines become necessary,
+the approved fallback is a Windows-only `psutil` dependency behind the same
+internal interface.
+
+### Known limits
+
+- Windows 11 can withhold WLAN details from command-line tools unless
+  location services are enabled for desktop apps. The WiFi row then reads
+  `unknown`, while router-based recognition keeps working.
+- In a Windows virtual machine without a WiFi adapter, the virtual network
+  counts as Ethernet.
+- Terminal rendering still uses curses through the `windows-curses`
+  package until the planned move to the Expletives library.
+
 ## Related Documents
 
 - `project-management/proposals/approved/ubersight-side-window-dashboard.md`
+- `project-management/proposals/approved/windows-platform-support.md`
+- `docs/specifications/windows-platform-support.md`
 - `AGENTS.md`, project-specific Ubersight side-window dashboard guidance
 
 ## Tests
@@ -526,4 +673,5 @@ Relevant tests live in:
 
 ```text
 tests/test_ubersight.py
+tests/test_windows_support.py
 ```

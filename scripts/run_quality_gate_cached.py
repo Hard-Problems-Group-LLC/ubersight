@@ -42,6 +42,10 @@ DEFAULT_EXCLUDES = {
     "project.egg-info",
     "__pycache__",
 }
+# Checkout-local operator state is never scanned or fingerprinted, even when
+# a Git ignore check is unavailable. Matching is by exact directory name.
+LOCAL_STATE_DIR_NAMES = {".local"}
+GITLINK_MODE = b"160000"
 
 CHECK_ORDER = [
     "black",
@@ -199,7 +203,8 @@ def iter_scope_files(
             dirnames[:] = [
                 name
                 for name in dirnames
-                if not path_is_excluded(
+                if name not in LOCAL_STATE_DIR_NAMES
+                and not path_is_excluded(
                     (current_path / name).relative_to(repo_root), excludes
                 )
             ]
@@ -228,16 +233,61 @@ def iter_scope_files(
     return [candidate for candidate in unique_files if candidate not in ignored]
 
 
+def git_submodule_roots(repo_root: Path) -> List[Path]:
+    """Return the submodule roots recorded as gitlinks in ``repo_root``."""
+
+    result = subprocess.run(
+        ["git", "ls-files", "--stage", "-z"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git ls-files failed in {repo_root}: {message}")
+    roots: List[Path] = []
+    for record in result.stdout.split(b"\0"):
+        metadata, separator, relative = record.partition(b"\t")
+        if separator and metadata.split(b" ", 1)[0] == GITLINK_MODE:
+            roots.append(repo_root / relative.decode("utf-8"))
+    return roots
+
+
 def git_ignored_paths(repo_root: Path, candidates: Sequence[Path]) -> set[Path]:
-    rel_paths = []
+    """Return the candidates that Git ignores, asking each owning repository.
+
+    `git check-ignore` rejects the whole batch when any path lies inside a
+    populated submodule, so paths are grouped by owning repository first.
+    A failed check raises instead of reporting nothing ignored, which would
+    otherwise pull ignored local state into the scan.
+    """
+
+    owned_here: List[Path] = []
+    by_submodule: Dict[Path, List[Path]] = {}
+    submodule_roots = git_submodule_roots(repo_root) if candidates else []
     for candidate in candidates:
         try:
-            rel_paths.append(candidate.relative_to(repo_root).as_posix())
+            candidate.relative_to(repo_root)
         except ValueError:
             continue
-    if not rel_paths:
-        return set()
+        owner = next(
+            (root for root in submodule_roots if candidate.is_relative_to(root)),
+            None,
+        )
+        if owner is None:
+            owned_here.append(candidate)
+        else:
+            by_submodule.setdefault(owner, []).append(candidate)
 
+    ignored: set[Path] = set()
+    for submodule_root, members in by_submodule.items():
+        ignored |= git_ignored_paths(submodule_root, members)
+    if not owned_here:
+        return ignored
+
+    rel_paths = [
+        candidate.relative_to(repo_root).as_posix() for candidate in owned_here
+    ]
     input_bytes = b"".join(relative.encode("utf-8") + b"\0" for relative in rel_paths)
     result = subprocess.run(
         ["git", "check-ignore", "--stdin", "-z"],
@@ -247,13 +297,26 @@ def git_ignored_paths(repo_root: Path, candidates: Sequence[Path]) -> set[Path]:
         input=input_bytes,
     )
     if result.returncode not in {0, 1}:
-        return set()
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git check-ignore failed in {repo_root}: {message}")
 
-    ignored: set[Path] = set()
     for relative in result.stdout.decode("utf-8").split("\0"):
         if relative:
             ignored.add(repo_root / relative)
     return ignored
+
+
+def execution_context() -> str:
+    """Return the platform and Python version that a cached result depends on.
+
+    Some tests run only on one platform or Python version, so a pass
+    recorded under one context proves nothing about another. A checkout
+    shared between Windows and WSL, for example, would otherwise let a Linux
+    pass skip the Windows-only tests.
+    """
+
+    major, minor = sys.version_info[:2]
+    return f"platform:{sys.platform}\npython:{major}.{minor}\n"
 
 
 def fingerprint_files(
@@ -261,8 +324,11 @@ def fingerprint_files(
     files: Iterable[Path],
     check_name: str,
 ) -> tuple[str, int]:
+    """Hash one check's in-scope files and execution context for the cache."""
+
     digest = hashlib.sha256()
     digest.update(f"schema:{SCHEMA_VERSION}\ncheck:{check_name}\n".encode("utf-8"))
+    digest.update(execution_context().encode("utf-8"))
     count = 0
     for file_path in files:
         rel = file_path.relative_to(repo_root).as_posix()
@@ -510,14 +576,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     for check_name in requested_checks:
         scope = CHECK_SCOPE[check_name]
-        files = iter_scope_files(
-            repo_root=repo_root,
-            roots=scope["roots"],  # type: ignore[index]
-            extensions=scope["extensions"],  # type: ignore[index]
-            extra_files=scope["extra_files"],  # type: ignore[index]
-            exclude_patterns=scope["exclude_patterns"],  # type: ignore[index]
-            skip_gitignored=bool(scope.get("skip_gitignored", False)),
-        )
+        try:
+            files = iter_scope_files(
+                repo_root=repo_root,
+                roots=scope["roots"],  # type: ignore[index]
+                extensions=scope["extensions"],  # type: ignore[index]
+                extra_files=scope["extra_files"],  # type: ignore[index]
+                exclude_patterns=scope["exclude_patterns"],  # type: ignore[index]
+                skip_gitignored=bool(scope.get("skip_gitignored", False)),
+            )
+        except RuntimeError as error:
+            print(f"[quality-gate] FAIL {check_name}: {error}", file=sys.stderr)
+            return 2
         fingerprint, file_count = fingerprint_files(repo_root, files, check_name)
 
         cache_entry = checks_cache.get(check_name)

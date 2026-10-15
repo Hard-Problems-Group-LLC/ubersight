@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -101,7 +101,8 @@ def test_render_defaults_fit_40_by_40() -> None:
     assert any(line.startswith(">Slice 2") for line in lines)
     assert any("Workers" == line for line in lines)
     assert sum(line.strip().startswith("OPSEC:") for line in lines[-9:]) >= 2
-    assert any(line.startswith("HOST: diogenes") for line in lines[-9:])
+    assert "mheck@diogenes" in lines[-9:]
+    assert "WIFI: FixtureNet" in lines[-9:]
     assert any(line.startswith("LOC: Example City") for line in lines[-9:])
     assert len(lines) <= 40
     assert all(len(line) <= 40 for line in lines)
@@ -975,6 +976,216 @@ def test_default_gateway_macs_use_router_neighbor_entry() -> None:
     assert ubersight._default_gateway_macs(fake_run_command) == ("aa:bb:cc:dd:ee:ff",)
 
 
+def add_sysfs_interface(
+    root: Path,
+    name: str,
+    *,
+    link_type: str = "1",
+    driver: str | None = None,
+    devtype: str | None = None,
+    phy80211: bool = False,
+    lowers: tuple[str, ...] = (),
+) -> None:
+    """Add one interface to a fake `/sys/class/net` tree.
+
+    Real sysfs uses symlinks for `device`, `phy80211`, and `lower_*`. The
+    check only tests that they exist and reads `device/uevent`, so plain
+    directories stand in for them on every platform.
+    """
+
+    path = root / name
+    path.mkdir(parents=True)
+    uevent = f"DEVTYPE={devtype}\n" if devtype else ""
+    (path / "uevent").write_text(f"{uevent}INTERFACE={name}\n", encoding="utf-8")
+    (path / "type").write_text(f"{link_type}\n", encoding="utf-8")
+    if driver is not None:
+        (path / "device").mkdir()
+        (path / "device" / "uevent").write_text(f"DRIVER={driver}\n", encoding="utf-8")
+    if phy80211:
+        (path / "phy80211").mkdir()
+    for lower in lowers:
+        (path / f"lower_{lower}").mkdir()
+
+
+def linux_sys_class_net(root: Path) -> Path:
+    """Build a fake `/sys/class/net` holding common Linux link shapes."""
+
+    add_sysfs_interface(root, "enp3s0", driver="e1000e")
+    add_sysfs_interface(root, "wlp2s0", driver="iwlwifi", devtype="wlan", phy80211=True)
+    add_sysfs_interface(root, "wwan0", driver="cdc_ether", devtype="wwan")
+    add_sysfs_interface(root, "eth0", driver="hv_netvsc")
+    add_sysfs_interface(root, "ens3", driver="virtio_net")
+    add_sysfs_interface(root, "tun0", link_type="65534")
+    add_sysfs_interface(root, "veth1")
+    add_sysfs_interface(root, "br0", devtype="bridge", lowers=("enp3s0", "veth1"))
+    add_sysfs_interface(root, "br0.42", devtype="vlan", lowers=("br0",))
+    add_sysfs_interface(root, "virbr0", devtype="bridge", lowers=("veth1",))
+    add_sysfs_interface(root, "bond0", devtype="bond", lowers=("enp3s0", "wlp2s0"))
+    return root
+
+
+@pytest.mark.parametrize(
+    ("interface", "expected"),
+    [
+        ("enp3s0", "wired"),
+        ("wlp2s0", "wireless"),
+        ("wwan0", "wireless"),
+        ("eth0", "other"),
+        ("ens3", "other"),
+        ("tun0", "other"),
+        ("veth1", "other"),
+        ("br0", "wired"),
+        ("br0.42", "wired"),
+        ("virbr0", "other"),
+        ("bond0", "wireless"),
+        ("missing0", "other"),
+        ("..", "other"),
+    ],
+)
+def test_linux_interface_kind_reads_sysfs(
+    tmp_path: Path, interface: str, expected: str
+) -> None:
+    root = linux_sys_class_net(tmp_path / "net")
+
+    assert ubersight._linux_interface_kind(root, interface) == expected
+
+
+def linux_wired_probe_runner(*default_routes: str):
+    """Fake `run_command` for a Linux host with no WiFi tools.
+
+    `default_routes` are interface names; each one's gateway answers with
+    its own MAC address.
+    """
+
+    routes = "".join(
+        f"default via 192.0.2.{index} dev {name} proto dhcp metric {index}00\n"
+        for index, name in enumerate(default_routes, start=1)
+    )
+
+    def run(args, *, cwd=None, timeout_seconds=10.0):
+        args = tuple(args)
+        if args == ("ip", "route", "show", "default"):
+            return ubersight.CommandResult(args, 0, routes, "")
+        if args[:3] == ("ip", "neigh", "show") and len(args) == 6:
+            gateway, interface = args[3], args[5]
+            mac = f"00:11:22:33:44:{gateway.rsplit('.', 1)[1].zfill(2)}"
+            return ubersight.CommandResult(
+                args, 0, f"{gateway} dev {interface} lladdr {mac} REACHABLE\n", ""
+            )
+        if args[:2] == ("ip", "-o"):
+            return ubersight.CommandResult(
+                args, 0, "2: enp3s0    inet 192.0.2.50/24 scope global enp3s0\n", ""
+            )
+        return ubersight.CommandResult(args, 127, "", "not found")
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("default_routes", "expected"),
+    [
+        (("enp3s0",), True),
+        (("br0.42",), True),
+        (("wlp2s0",), False),
+        (("enp3s0", "wlp2s0"), False),
+        (("eth0",), False),
+        (("tun0",), False),
+    ],
+    ids=["nic", "vlan-on-bridge", "wifi", "nic-and-wifi", "wsl2", "tunnel"],
+)
+def test_linux_observation_is_wired_only_over_a_wired_link(
+    tmp_path: Path, default_routes: tuple[str, ...], expected: bool
+) -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=linux_wired_probe_runner(*default_routes),
+        geolocate=False,
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.wifi_ssid == "unknown"
+    assert observation.gateway_macs
+    assert observation.wired is expected
+
+
+@pytest.mark.parametrize(
+    ("default_route", "expected_ssid", "expected_wired"),
+    [("enp3s0", "unknown", True), ("wlp2s0", "Example Cafe Guest", False)],
+    ids=["cable-explains-it", "unexplained-gap"],
+)
+def test_cached_ssid_fills_only_an_unexplained_wifi_gap(
+    tmp_path: Path, default_route: str, expected_ssid: str, expected_wired: bool
+) -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=linux_wired_probe_runner(default_route),
+        geolocate=False,
+        fallback_ssid="Example Cafe Guest",
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.wifi_ssid == expected_ssid
+    assert observation.wired is expected_wired
+
+
+def test_moving_from_wifi_to_a_cable_shows_ethernet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cached WiFi name must not outlive the move to a cable."""
+
+    monkeypatch.setattr(
+        ubersight, "LINUX_SYS_CLASS_NET", linux_sys_class_net(tmp_path / "net")
+    )
+    now = ubersight._local_now()
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(
+        cache,
+        ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="Example Cafe Guest",
+            location="Example City",
+            updated_at=now - timedelta(seconds=60),
+            network_observed_at=now - timedelta(seconds=120),
+        ),
+    )
+
+    status = ubersight.load_or_refresh_operator_location(
+        cache,
+        now=now,
+        network_max_age_seconds=30,
+        run_command=linux_wired_probe_runner("enp3s0"),
+        geolocate=False,
+        memory_path=tmp_path / "memory.json",
+        network_profiles_path=tmp_path / "profiles.json",
+        observation_log_path=tmp_path / "observations.jsonl",
+    )
+
+    assert status.wired is True
+    assert status.wifi_ssid == "unknown"
+    assert ubersight._network_display_segment(status) == "Ethernet (unknown LAN)"
+
+
+def test_linux_wired_check_needs_a_router_mac(tmp_path: Path) -> None:
+    """A cable with no known router has nothing to remember the LAN by."""
+
+    def run(args, *, cwd=None, timeout_seconds=10.0):
+        if tuple(args) == ("ip", "route", "show", "default"):
+            return ubersight.CommandResult(
+                tuple(args), 0, "default via 192.0.2.1 dev enp3s0\n", ""
+            )
+        if tuple(args)[:2] == ("ip", "neigh"):
+            return ubersight.CommandResult(tuple(args), 0, "", "")
+        return ubersight.CommandResult(tuple(args), 127, "", "not found")
+
+    observation = ubersight.observe_operator_location(
+        run_command=run,
+        geolocate=False,
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.gateway_macs == ()
+    assert observation.wired is False
+
+
 def test_same_ssid_cache_uses_network_fingerprint_when_available(
     tmp_path: Path,
 ) -> None:
@@ -1358,9 +1569,12 @@ def test_footer_status_blocks_can_expand_to_three_lines() -> None:
     )
 
     footer = lines[-9:]
-    assert any(line.strip().startswith("OPSEC:") for line in footer[:3])
-    assert any(line.startswith("HOST:") for line in footer[3:6])
-    assert any(line.startswith("LOC:") for line in footer[6:])
+    opsec = [i for i, line in enumerate(footer) if line.startswith("OPSEC:")]
+    identity = footer.index("operator@very-long-hostname")
+    loc = [i for i, line in enumerate(footer) if line.startswith("LOC:")]
+    assert len(opsec) == 3 and max(opsec) < identity
+    assert footer[identity + 1] == "WIFI: Long Wireless Network Name"
+    assert loc and min(loc) == identity + 2
     assert all(len(line) <= 32 for line in footer)
 
 
@@ -1394,9 +1608,7 @@ def test_tailscale_footer_renders_below_opsec() -> None:
         for index, line in enumerate(lines)
         if line.strip().startswith("Tailscale:")
     )
-    host_index = next(
-        index for index, line in enumerate(lines) if line.startswith("HOST:")
-    )
+    host_index = lines.index("mheck@diogenes")
     assert opsec_index < tailscale_index < host_index
     assert lines[tailscale_index].startswith("Tailscale:")
     assert "alpha-bravo UP" in lines[tailscale_index]
@@ -1503,8 +1715,10 @@ def test_colored_header_and_footer_lines_paint_full_width() -> None:
     assert ubersight._curses_line_text("WORK: SAFE, SYNCED", 30) == (
         "WORK: SAFE, SYNCED".ljust(30)
     )
+    # Routine OPSEC notes are colored text without a band; only the
+    # public-network alarm paints across the pane.
     assert ubersight._curses_line_text("OPSEC: LOCAL STATUS", 30) == (
-        "OPSEC: LOCAL STATUS".ljust(30)
+        "OPSEC: LOCAL STATUS"
     )
     assert ubersight._curses_line_text("OPSEC!: PUBLIC NETWORK", 30) == (
         "OPSEC!: PUBLIC NETWORK".ljust(30)
@@ -1521,8 +1735,8 @@ def test_colored_header_and_footer_lines_paint_full_width() -> None:
     assert ubersight._curses_line_text("(R)efresh  (E)nter", 30) == (
         "(R)efresh  (E)nter".ljust(30)
     )
-    assert ubersight._curses_line_text("HOST: diogenes", 30) == (
-        "HOST: diogenes".ljust(30)
+    assert ubersight._curses_line_text("operator@example-host", 30, band=True) == (
+        "operator@example-host".ljust(30)
     )
     assert ubersight._curses_line_text("PROJECT: UBERSIGHT", 30) == (
         "PROJECT: UBERSIGHT"
@@ -1543,7 +1757,9 @@ def test_public_opsec_uses_white_on_red() -> None:
     ) == (FakeCurses.color_pair(7) | FakeCurses.A_BOLD)
 
 
-def test_tailscale_status_colors_reflect_state() -> None:
+def test_routine_opsec_is_text_only_while_public_alarm_keeps_its_band() -> None:
+    """Routine OPSEC notes use colored text; only the alarm paints a band."""
+
     class FakeCurses:
         A_BOLD = 1
         A_NORMAL = 0
@@ -1553,17 +1769,156 @@ def test_tailscale_status_colors_reflect_state() -> None:
             return index * 100
 
     assert ubersight._curses_attr_for_line(
+        FakeCurses, "OPSEC: LOCAL STATUS / LOCATION ESTIMATE;", True
+    ) == (FakeCurses.color_pair(12) | FakeCurses.A_BOLD)
+    assert not ubersight._line_uses_full_width_background("OPSEC: LOCAL STATUS")
+    assert ubersight._line_uses_full_width_background("OPSEC!: PUBLIC NETWORK")
+    assert ubersight._curses_line_text("OPSEC: short", 20) == "OPSEC: short"
+
+
+def test_local_work_banner_is_plain_black_on_yellow() -> None:
+    """The local/pull banner avoids bold, which greys out black text."""
+
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    for label in ("WORK: UNCOMMITTED LOCAL", "WORK: LOCAL", "WORK: PULL FIRST"):
+        assert ubersight._curses_attr_for_line(
+            FakeCurses, f"  {label}  ", True
+        ) == FakeCurses.color_pair(13)
+
+
+def test_only_the_public_opsec_alarm_centers_its_first_row() -> None:
+    """Routine OPSEC rows stay left-aligned; the alarm band centers its title."""
+
+    routine = ubersight._opsec_footer_lines(48, max_lines_per_status=3)
+    public = ubersight._opsec_footer_lines(
+        48,
+        max_lines_per_status=3,
+        operator_location=ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="Example Free Public WiFi",
+            location="Example City",
+        ),
+    )
+
+    assert all(line.startswith("OPSEC: ") for line in routine)
+    assert public[0].startswith(" ") and public[0].strip().startswith("OPSEC!: ")
+
+
+def test_identity_rows_show_user_at_host_then_network() -> None:
+    wifi = ubersight.OperatorLocationStatus(
+        "example-host", "operator", "FixtureNet", "x"
+    )
+    wired = ubersight.OperatorLocationStatus(
+        "example-host",
+        "operator",
+        "unknown",
+        "x",
+        wired=True,
+        network_label="Example Wired LAN",
+    )
+
+    assert ubersight._operator_identity_lines(wifi, 40) == (
+        "operator@example-host",
+        "WIFI: FixtureNet",
+    )
+    assert ubersight._operator_identity_lines(wired, 40) == (
+        "operator@example-host",
+        "Ethernet (Example Wired LAN)",
+    )
+    assert ubersight._operator_identity_lines(wired, 10)[0] == "operato..."
+
+
+def test_identity_rows_are_styled_from_data_not_text() -> None:
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    assert ubersight._curses_attr_for_line(
+        FakeCurses, "operator@example-host", True, ubersight.HOST_STATE
+    ) == FakeCurses.color_pair(10)
+    assert (
+        ubersight._curses_attr_for_line(FakeCurses, "operator@example-host", True)
+        == FakeCurses.A_NORMAL
+    )
+    assert ubersight._curses_line_text("operator@example-host", 21) == (
+        "operator@example-host"
+    )
+
+
+def test_tailscale_status_colors_reflect_state() -> None:
+    class FakeCurses:
+        A_BOLD = 1
+        A_NORMAL = 0
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    # Dark text on a band is plain; light text on a band is bold.
+    assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: alpha-bravo UP", True
-    ) == (FakeCurses.color_pair(14) | FakeCurses.A_BOLD)
+    ) == FakeCurses.color_pair(14)
     assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: alpha-bravo DOWN", True
-    ) == (FakeCurses.color_pair(15) | FakeCurses.A_BOLD)
+    ) == FakeCurses.color_pair(15)
     assert ubersight._curses_attr_for_line(
         FakeCurses, "Tailscale: LOGGED OUT", True
     ) == (FakeCurses.color_pair(16) | FakeCurses.A_BOLD)
-    assert ubersight._curses_attr_for_line(FakeCurses, "Tailscale: ERROR", True) == (
-        FakeCurses.color_pair(17) | FakeCurses.A_BOLD
-    )
+    assert ubersight._curses_attr_for_line(
+        FakeCurses, "Tailscale: ERROR", True
+    ) == FakeCurses.color_pair(17)
+
+
+def test_dark_text_on_bands_is_never_bold() -> None:
+    """Bold black renders grey in PDCurses and bold-as-bright terminals."""
+
+    class FakeCurses:
+        A_BOLD = 1
+
+        @staticmethod
+        def color_pair(index):
+            return index * 100
+
+    for pair, (foreground, background) in ubersight.CURSES_COLOR_PAIRS.items():
+        attr = ubersight._pair_attr(FakeCurses, pair)
+        if foreground == "BLACK":
+            assert background is not None
+            assert attr == FakeCurses.color_pair(pair), pair
+        else:
+            assert attr == FakeCurses.color_pair(pair) | FakeCurses.A_BOLD, pair
+    # No band pairs red text with a cyan background, which is unreadable.
+    assert ("RED", "CYAN") not in ubersight.CURSES_COLOR_PAIRS.values()
+
+
+def test_color_pairs_register_with_curses_constants() -> None:
+    registered: dict[int, tuple[int, int]] = {}
+
+    class FakeCurses:
+        COLOR_BLACK, COLOR_RED, COLOR_GREEN, COLOR_YELLOW = 0, 1, 2, 3
+        COLOR_BLUE, COLOR_MAGENTA, COLOR_CYAN, COLOR_WHITE = 4, 5, 6, 7
+
+        @staticmethod
+        def init_pair(pair, foreground, background):
+            registered[pair] = (foreground, background)
+
+    ubersight._init_color_pairs(FakeCurses)
+
+    assert sorted(registered) == list(range(1, 19))
+    assert registered[1] == (FakeCurses.COLOR_CYAN, -1)
+    assert registered[8] == (FakeCurses.COLOR_BLACK, FakeCurses.COLOR_CYAN)
+    assert registered[13] == (FakeCurses.COLOR_BLACK, FakeCurses.COLOR_YELLOW)
 
 
 def test_load_background_jobs_reads_live_status_files(tmp_path: Path) -> None:
@@ -1765,7 +2120,7 @@ def test_collect_process_tree_uses_fake_proc(tmp_path: Path) -> None:
 
 def test_stop_helper_matches_legacy_and_installed_dashboard_commands() -> None:
     assert stop_ubersight._is_ubersight_dashboard_command(
-        "python scripts/ubersight.py --once"
+        "python scripts/ubersight.py --refresh-ms 500"
     )
     assert stop_ubersight._is_ubersight_dashboard_command(
         "/repo/.venv/bin/python /repo/.venv/bin/ubersight"
@@ -1790,6 +2145,7 @@ def test_project_install_manages_all_console_launchers(tmp_path: Path) -> None:
         mode="standard",
         venv_path=venv_path,
         bin_dir=bin_dir,
+        copy_launchers=False,
     )
 
     assert {launcher.name for launcher in launchers} == set(project_install.COMMANDS)
@@ -1805,6 +2161,7 @@ def test_project_install_manages_all_console_launchers(tmp_path: Path) -> None:
             mode="venv-only",
             venv_path=venv_path,
             bin_dir=bin_dir,
+            copy_launchers=False,
         )
         == ()
     )

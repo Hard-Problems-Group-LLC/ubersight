@@ -18,21 +18,12 @@ untracked.
 
 Recent phases:
 
-* Phase 1: Standalone package foundation, done.
-* Phase 2: Side-window dashboard runtime, done.
-* Phase 3: Operator context safety panels, done.
-* Phase 4: Roadmap-backed status workflow, done.
 * Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
 
-Recent and active slices:
+Active phase:
 
-* Slice 1: Establish package layout and launchers, done.
-* Slice 2: Restore managed quality-gate files, done.
-* Slice 3: Add roadmap-backed status convention, done.
-* Slice 8: Polish install and update workflow, done.
-* Slice 9: Investigate executable truncation, done.
-* Slice 10: Harden command logs and recovery guidance, done.
+* Phase 11: Native Windows support, done.
 
 Upcoming phases:
 
@@ -41,16 +32,36 @@ Upcoming phases:
 * Phase 7: Status-schema hardening and validation, planned.
 * Phase 8: Dashboard usability refinement, planned.
 
-Upcoming slices:
+Active phase slices:
 
-* Slice 4: Add roadmap parsing helper, planned.
-* Slice 5: Document consuming-project onboarding, planned.
-* Slice 6: Harden status-writer validation, planned.
-* Slice 7: Broaden dashboard smoke coverage, planned.
+* Slice 11: Fix Windows runtime blockers, done.
+* Slice 12: Add Windows process identity, done.
+* Slice 13: Port stop and restart workflow, done.
+* Slice 14: Add Windows network probes, done.
+* Slice 15: Add Windows install path, done.
+* Slice 16: Reach Windows test parity, done.
+* Slice 20: Add Linux wired-network mark, done.
 
 ## Current Work
 
-Guarded shared-pyenv corruption recovery repaired the live Python 3.14.6
-runtime and passed the uncached full quality gate. Phase 10 forensics traced
-the damage to replayed installer output whose `->` marker became Bash output
-redirection. Slice 10 replaced that marker locally and filed upstream guidance.
+Phase 11 runs on `feature/windows-platform-support`. The specification is
+`docs/specifications/windows-platform-support.md`, and the approved proposal
+records the operator's decisions.
+
+Done:
+- Slices 11 and 12: runtime blockers and process identity.
+- Slice 13: `ubersight --supervise` and a Windows-capable `ubersight-stop`.
+- Slice 14: Windows network probes, `Ethernet (<LAN name>)`, and the
+  redesigned location editor.
+- Slice 15: `install.ps1` and the Windows stage two.
+- Slice 16: Windows test parity; the remaining skips are permanent
+  POSIX-only cases with explicit reasons.
+- Slice 20, added after the Linux test run: `Ethernet (<LAN name>)` on
+  wired Linux hosts, read from `/sys/class/net`.
+
+The Linux test run passed on 2026-10-14. Remaining before `trunk`: the
+pre-merge review.
+
+Phase 12 (`ubersight-autosplit`) builds on this branch from
+`feature/ubersight-autosplit`. The Expletives terminal-library port and the
+FieldManual migration stay out of this branch.
