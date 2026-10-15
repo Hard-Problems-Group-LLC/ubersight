@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: Implemented (Slices 11 through 16); verified on Linux 2026-10-14  
+Status: Implemented (Slices 11 through 16, and 20); verified on Linux 2026-10-14  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -227,8 +227,32 @@ location-memory record's Label, named with the `E` editor. Until the LAN is
 named, the footer shows `Ethernet (unknown LAN)`. LAN names live in
 location memory under `.local/` for now and move with the per-user state
 fix. A WLAN query withheld for
-location permission never counts as "no connection". On Linux, the wired
-mark is reserved for a future slice.
+location permission never counts as "no connection".
+
+Slice 20 added the Linux wired mark. Linux has no WLAN service to ask, so
+the evidence comes from `/sys/class/net` instead. With no WiFi name and a
+router MAC, the observation is wired when every interface carrying a
+default route is wired:
+
+- **Wired:** an Ethernet-type device (`type` 1) backed by hardware
+  (`device`).
+- **Never wired:** 802.11 devices (`wireless`, `phy80211`, or `DEVTYPE`
+  `wlan`), mobile broadband (`DEVTYPE` `wwan`), tunnels, veth pairs, and
+  paravirtual NICs (`hv_netvsc`, `virtio_net`, `vmxnet3`, and Xen's
+  `vif`). A virtual machine's NIC, including WSL2's, says nothing about
+  the host's uplink.
+- **Bridges, bonds, and VLANs** take their kind from the devices beneath
+  them (`lower_*`): wireless if any is wireless, otherwise wired if any is
+  wired.
+
+A virtual machine with an emulated NIC, such as an `e1000` under VMware,
+looks like hardware and is marked wired.
+
+When every WiFi probe fails, the dashboard normally reuses the cached
+WiFi name, because a failed probe is no evidence of a move. A wired
+observation is the exception on both platforms: the cable explains the
+missing name. Before Slice 20, moving from WiFi to a cable kept showing
+the old WiFi name and never showed `Ethernet`.
 
 ### Per-user state
 

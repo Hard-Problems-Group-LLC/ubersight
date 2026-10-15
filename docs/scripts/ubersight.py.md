@@ -453,7 +453,12 @@ is preferred because connection profile names may be operator-defined and can
 lag the actual network after a network change. If those all fail,
 Ubersight reuses the last cached SSID literal when one is available, so a
 temporary desktop/session inspection failure does not immediately degrade the
-internal location match to `unknown`. A failed live inspection does not mark
+internal location match to `unknown`. A wired connection is the exception,
+since the cable explains the missing SSID. On a cable, the footer shows
+`Ethernet (<LAN name>)` instead of `WIFI:`. Windows recognizes the cable when
+`netsh` reports no WLAN connection; Linux reads `/sys/class/net`, and counts
+a physical Ethernet NIC, or a bridge or VLAN on one, but not a virtual
+machine's paravirtual NIC. A failed live inspection does not mark
 the cached SSID as freshly observed; Ubersight will keep retrying the local
 network probe instead of treating stale fallback data as proof that the
 operator has not moved.

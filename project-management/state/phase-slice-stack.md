@@ -44,6 +44,7 @@ Phase 11 slices, all done:
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, done.
+* Slice 20: Add Linux wired-network mark, done.
 
 ## Current Work
 
@@ -59,6 +60,8 @@ Status:
   `ubersight-stop` restarts it in place.
 - tmux and GNU screen were verified live on the WSL2 Rocky and Fedora
   bench, locally and over SSH, and tmux over mosh. WezTerm, kitty, and
-  Terminator still await live verification.
-- Phase 11 passed its Linux test run on 2026-10-14 and awaits the merge
-  to `trunk`.
+  Terminator await the operator's workstation and are backlogged.
+- Phase 11 passed its Linux test run on 2026-10-14. Slice 20, the Linux
+  `Ethernet (<LAN name>)` mark, was added afterwards.
+- The operator approved merging both branches to `trunk` after a
+  multi-angle review.

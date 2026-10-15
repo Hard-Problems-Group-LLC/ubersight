@@ -84,6 +84,10 @@ VALID_BACKGROUND_JOB_STATES = {
     "running",
     "starting",
 }
+LINUX_SYS_CLASS_NET = Path("/sys/class/net")
+# A guest's paravirtual NIC, such as WSL2's, says nothing about the host's
+# own uplink, which may well be WiFi. `vif` is Xen's netfront driver.
+PARAVIRTUAL_NIC_DRIVERS = frozenset({"hv_netvsc", "virtio_net", "vmxnet3", "vif"})
 
 
 @dataclass(frozen=True)
@@ -1388,21 +1392,40 @@ def observe_operator_location(
     geolocate: bool = True,
     urlopen_func: Any = urlopen,
     fallback_ssid: str = "",
+    sys_class_net: Path | None = None,
 ) -> location_memory.LocationObservation:
-    """Collect local-only signals describing the current operator environment."""
+    """Collect local-only signals describing the current operator environment.
+
+    `fallback_ssid`, usually the cached SSID, stands in when every WiFi
+    probe fails, unless the observation proves a cable. `sys_class_net`
+    replaces `/sys/class/net`, which the Linux wired check reads, so tests
+    never depend on the host's own network devices.
+    """
 
     network_estimate = (
         _geolocation_from_ip(urlopen_func=urlopen_func) if geolocate else None
     )
-    wifi_ssid = _active_wifi_ssid(run_command=run_command, fallback_ssid=fallback_ssid)
-    gateway_macs = _default_gateway_macs(run_command=run_command)
-    # Wired only when WiFi is affirmatively off-line: a WLAN query that
+    wifi_ssid = _active_wifi_ssid(run_command=run_command)
+    gateway_routes = _default_gateway_routes(run_command)
+    gateway_macs = _gateway_macs_for_routes(gateway_routes, run_command)
+    # Wired only on affirmative evidence. Linux shows it in sysfs; Windows
+    # shows it as a WLAN service with no connection. A WLAN query that
     # Windows withholds for location permission must not read as a cable.
     wired = (
         wifi_ssid == "unknown"
         and bool(gateway_macs)
-        and _wifi_reported_disconnected(run_command)
+        and (
+            _linux_routes_are_wired(
+                tuple(dict.fromkeys(interface for interface, _ in gateway_routes)),
+                LINUX_SYS_CLASS_NET if sys_class_net is None else sys_class_net,
+            )
+            or _wifi_reported_disconnected(run_command)
+        )
     )
+    # A cable explains the missing WiFi name. Reusing the cached SSID then
+    # would keep showing the network the operator just left.
+    if not wired and wifi_ssid == "unknown" and fallback_ssid not in {"", "unknown"}:
+        wifi_ssid = fallback_ssid
     return location_memory.LocationObservation(
         hostname=socket.gethostname(),
         username=getpass.getuser(),
@@ -1553,8 +1576,16 @@ def _neighbor_mac_for_gateway(
 def _default_gateway_macs(run_command: Any = _run_command) -> tuple[str, ...]:
     """Return default-gateway router MAC addresses when the OS exposes them."""
 
+    return _gateway_macs_for_routes(_default_gateway_routes(run_command), run_command)
+
+
+def _gateway_macs_for_routes(
+    routes: Sequence[tuple[str, str]], run_command: Any
+) -> tuple[str, ...]:
+    """Return the router MAC addresses behind `(interface, gateway-ip)` routes."""
+
     macs: list[str] = []
-    for interface, gateway_ip in _default_gateway_routes(run_command):
+    for interface, gateway_ip in routes:
         mac = _neighbor_mac_for_gateway(
             gateway_ip,
             interface,
@@ -1563,6 +1594,72 @@ def _default_gateway_macs(run_command: Any = _run_command) -> tuple[str, ...]:
         if mac and mac != "00:00:00:00:00:00" and mac not in macs:
             macs.append(mac)
     return tuple(macs)
+
+
+def _linux_routes_are_wired(interfaces: Sequence[str], sys_class_net: Path) -> bool:
+    """Return whether every default route leaves through a wired Linux link.
+
+    Elsewhere, including Windows, where routes name interface addresses,
+    no interface is found and nothing is affirmed.
+    """
+
+    return bool(interfaces) and all(
+        _linux_interface_kind(sys_class_net, interface) == "wired"
+        for interface in interfaces
+    )
+
+
+def _linux_interface_kind(sys_class_net: Path, interface: str, depth: int = 0) -> str:
+    """Classify a Linux network interface as `wired`, `wireless`, or `other`.
+
+    Reads sysfs only:
+
+    - Wireless: an 802.11 device (`wireless` or `phy80211`), or a `DEVTYPE`
+      of `wlan` or `wwan` (mobile broadband).
+    - Wired: an Ethernet-type device (`type` 1) backed by hardware
+      (`device`), unless its driver is a hypervisor's paravirtual NIC.
+    - A bridge, bond, or VLAN has no hardware of its own, so it takes its
+      kind from the devices beneath it (`lower_*`): wireless if any is
+      wireless, else wired if any is wired.
+    - Anything else, such as a tunnel, a veth pair, a virtual machine's NIC,
+      or an unknown name, is `other`.
+    """
+
+    # Stacks are rarely more than a VLAN on a bond on a NIC; the depth
+    # limit only guards against a malformed tree.
+    if depth > 4 or not interface or interface in {".", ".."} or "/" in interface:
+        return "other"
+    path = sys_class_net / interface
+    try:
+        uevent = (path / "uevent").read_text(encoding="utf-8", errors="replace")
+        link_type = (path / "type").read_text(encoding="utf-8").strip()
+        if (
+            (path / "wireless").exists()
+            or (path / "phy80211").exists()
+            or re.search(r"^DEVTYPE=(?:wlan|wwan)$", uevent, re.MULTILINE)
+        ):
+            return "wireless"
+        if link_type != "1":
+            return "other"
+        if (path / "device").exists():
+            device_uevent = (path / "device" / "uevent").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            driver = re.search(r"^DRIVER=(\S+)$", device_uevent, re.MULTILINE)
+            if driver and driver.group(1) in PARAVIRTUAL_NIC_DRIVERS:
+                return "other"
+            return "wired"
+        lowers = sorted(
+            entry.name.removeprefix("lower_")
+            for entry in path.iterdir()
+            if entry.name.startswith("lower_")
+        )
+    except OSError:
+        return "other"
+    kinds = {_linux_interface_kind(sys_class_net, lower, depth + 1) for lower in lowers}
+    if "wireless" in kinds:
+        return "wireless"
+    return "wired" if "wired" in kinds else "other"
 
 
 def _ipv4(value: str) -> ipaddress.IPv4Address | None:

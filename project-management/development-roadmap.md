@@ -45,3 +45,4 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 17: Add autosplit core, WT, and tmux, done.
 * Slice 18: Add autosplit GNU screen backend, done.
 * Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
+* Slice 20: Add Linux wired-network mark, done.

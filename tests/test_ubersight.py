@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -974,6 +974,216 @@ def test_default_gateway_macs_use_router_neighbor_entry() -> None:
         raise AssertionError(args)
 
     assert ubersight._default_gateway_macs(fake_run_command) == ("aa:bb:cc:dd:ee:ff",)
+
+
+def add_sysfs_interface(
+    root: Path,
+    name: str,
+    *,
+    link_type: str = "1",
+    driver: str | None = None,
+    devtype: str | None = None,
+    phy80211: bool = False,
+    lowers: tuple[str, ...] = (),
+) -> None:
+    """Add one interface to a fake `/sys/class/net` tree.
+
+    Real sysfs uses symlinks for `device`, `phy80211`, and `lower_*`. The
+    check only tests that they exist and reads `device/uevent`, so plain
+    directories stand in for them on every platform.
+    """
+
+    path = root / name
+    path.mkdir(parents=True)
+    uevent = f"DEVTYPE={devtype}\n" if devtype else ""
+    (path / "uevent").write_text(f"{uevent}INTERFACE={name}\n", encoding="utf-8")
+    (path / "type").write_text(f"{link_type}\n", encoding="utf-8")
+    if driver is not None:
+        (path / "device").mkdir()
+        (path / "device" / "uevent").write_text(f"DRIVER={driver}\n", encoding="utf-8")
+    if phy80211:
+        (path / "phy80211").mkdir()
+    for lower in lowers:
+        (path / f"lower_{lower}").mkdir()
+
+
+def linux_sys_class_net(root: Path) -> Path:
+    """Build a fake `/sys/class/net` holding common Linux link shapes."""
+
+    add_sysfs_interface(root, "enp3s0", driver="e1000e")
+    add_sysfs_interface(root, "wlp2s0", driver="iwlwifi", devtype="wlan", phy80211=True)
+    add_sysfs_interface(root, "wwan0", driver="cdc_ether", devtype="wwan")
+    add_sysfs_interface(root, "eth0", driver="hv_netvsc")
+    add_sysfs_interface(root, "ens3", driver="virtio_net")
+    add_sysfs_interface(root, "tun0", link_type="65534")
+    add_sysfs_interface(root, "veth1")
+    add_sysfs_interface(root, "br0", devtype="bridge", lowers=("enp3s0", "veth1"))
+    add_sysfs_interface(root, "br0.42", devtype="vlan", lowers=("br0",))
+    add_sysfs_interface(root, "virbr0", devtype="bridge", lowers=("veth1",))
+    add_sysfs_interface(root, "bond0", devtype="bond", lowers=("enp3s0", "wlp2s0"))
+    return root
+
+
+@pytest.mark.parametrize(
+    ("interface", "expected"),
+    [
+        ("enp3s0", "wired"),
+        ("wlp2s0", "wireless"),
+        ("wwan0", "wireless"),
+        ("eth0", "other"),
+        ("ens3", "other"),
+        ("tun0", "other"),
+        ("veth1", "other"),
+        ("br0", "wired"),
+        ("br0.42", "wired"),
+        ("virbr0", "other"),
+        ("bond0", "wireless"),
+        ("missing0", "other"),
+        ("..", "other"),
+    ],
+)
+def test_linux_interface_kind_reads_sysfs(
+    tmp_path: Path, interface: str, expected: str
+) -> None:
+    root = linux_sys_class_net(tmp_path / "net")
+
+    assert ubersight._linux_interface_kind(root, interface) == expected
+
+
+def linux_wired_probe_runner(*default_routes: str):
+    """Fake `run_command` for a Linux host with no WiFi tools.
+
+    `default_routes` are interface names; each one's gateway answers with
+    its own MAC address.
+    """
+
+    routes = "".join(
+        f"default via 192.0.2.{index} dev {name} proto dhcp metric {index}00\n"
+        for index, name in enumerate(default_routes, start=1)
+    )
+
+    def run(args, *, cwd=None, timeout_seconds=10.0):
+        args = tuple(args)
+        if args == ("ip", "route", "show", "default"):
+            return ubersight.CommandResult(args, 0, routes, "")
+        if args[:3] == ("ip", "neigh", "show") and len(args) == 6:
+            gateway, interface = args[3], args[5]
+            mac = f"00:11:22:33:44:{gateway.rsplit('.', 1)[1].zfill(2)}"
+            return ubersight.CommandResult(
+                args, 0, f"{gateway} dev {interface} lladdr {mac} REACHABLE\n", ""
+            )
+        if args[:2] == ("ip", "-o"):
+            return ubersight.CommandResult(
+                args, 0, "2: enp3s0    inet 192.0.2.50/24 scope global enp3s0\n", ""
+            )
+        return ubersight.CommandResult(args, 127, "", "not found")
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("default_routes", "expected"),
+    [
+        (("enp3s0",), True),
+        (("br0.42",), True),
+        (("wlp2s0",), False),
+        (("enp3s0", "wlp2s0"), False),
+        (("eth0",), False),
+        (("tun0",), False),
+    ],
+    ids=["nic", "vlan-on-bridge", "wifi", "nic-and-wifi", "wsl2", "tunnel"],
+)
+def test_linux_observation_is_wired_only_over_a_wired_link(
+    tmp_path: Path, default_routes: tuple[str, ...], expected: bool
+) -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=linux_wired_probe_runner(*default_routes),
+        geolocate=False,
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.wifi_ssid == "unknown"
+    assert observation.gateway_macs
+    assert observation.wired is expected
+
+
+@pytest.mark.parametrize(
+    ("default_route", "expected_ssid", "expected_wired"),
+    [("enp3s0", "unknown", True), ("wlp2s0", "Example Cafe Guest", False)],
+    ids=["cable-explains-it", "unexplained-gap"],
+)
+def test_cached_ssid_fills_only_an_unexplained_wifi_gap(
+    tmp_path: Path, default_route: str, expected_ssid: str, expected_wired: bool
+) -> None:
+    observation = ubersight.observe_operator_location(
+        run_command=linux_wired_probe_runner(default_route),
+        geolocate=False,
+        fallback_ssid="Example Cafe Guest",
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.wifi_ssid == expected_ssid
+    assert observation.wired is expected_wired
+
+
+def test_moving_from_wifi_to_a_cable_shows_ethernet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cached WiFi name must not outlive the move to a cable."""
+
+    monkeypatch.setattr(
+        ubersight, "LINUX_SYS_CLASS_NET", linux_sys_class_net(tmp_path / "net")
+    )
+    now = ubersight._local_now()
+    cache = tmp_path / "location-cache.json"
+    ubersight._write_location_cache(
+        cache,
+        ubersight.OperatorLocationStatus(
+            hostname="example-host",
+            username="operator",
+            wifi_ssid="Example Cafe Guest",
+            location="Example City",
+            updated_at=now - timedelta(seconds=60),
+            network_observed_at=now - timedelta(seconds=120),
+        ),
+    )
+
+    status = ubersight.load_or_refresh_operator_location(
+        cache,
+        now=now,
+        network_max_age_seconds=30,
+        run_command=linux_wired_probe_runner("enp3s0"),
+        geolocate=False,
+        memory_path=tmp_path / "memory.json",
+        network_profiles_path=tmp_path / "profiles.json",
+        observation_log_path=tmp_path / "observations.jsonl",
+    )
+
+    assert status.wired is True
+    assert status.wifi_ssid == "unknown"
+    assert ubersight._network_display_segment(status) == "Ethernet (unknown LAN)"
+
+
+def test_linux_wired_check_needs_a_router_mac(tmp_path: Path) -> None:
+    """A cable with no known router has nothing to remember the LAN by."""
+
+    def run(args, *, cwd=None, timeout_seconds=10.0):
+        if tuple(args) == ("ip", "route", "show", "default"):
+            return ubersight.CommandResult(
+                tuple(args), 0, "default via 192.0.2.1 dev enp3s0\n", ""
+            )
+        if tuple(args)[:2] == ("ip", "neigh"):
+            return ubersight.CommandResult(tuple(args), 0, "", "")
+        return ubersight.CommandResult(tuple(args), 127, "", "not found")
+
+    observation = ubersight.observe_operator_location(
+        run_command=run,
+        geolocate=False,
+        sys_class_net=linux_sys_class_net(tmp_path / "net"),
+    )
+
+    assert observation.gateway_macs == ()
+    assert observation.wired is False
 
 
 def test_same_ssid_cache_uses_network_fingerprint_when_available(
