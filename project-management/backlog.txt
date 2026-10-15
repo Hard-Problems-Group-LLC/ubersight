@@ -22,6 +22,15 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   name; the installer and autosplit tests now follow the rule. Owner:
   Claude. Requestor: Claude. No active blocker.
 
+* 2026-10-14T20:45:00-07:00 - Verify the WezTerm, kitty, and Terminator
+  autosplit backends live (roadmap Slice 19), plus GNU screen over mosh.
+  The WSL2 bench verified tmux and screen but cannot run these graphical
+  terminals well. The checks are listed in the pending request in
+  `project-management/ai-human-requests.txt`; record results in the Live
+  Verification section of `docs/specifications/ubersight-autosplit.md`.
+  Owner: operator, with Claude. Requestor: operator. Blocked until the
+  operator is back at the Linux workstation.
+
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own
   feature branch, separate from Windows compatibility work. Owner: operator.

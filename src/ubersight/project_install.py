@@ -22,6 +22,7 @@ from typing import Sequence
 
 COMMANDS = (
     "ubersight",
+    "ubersight-autosplit",
     "ubersight-location-memory",
     "ubersight-probe-location",
     "ubersight-stop",

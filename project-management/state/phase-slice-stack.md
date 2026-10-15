@@ -18,12 +18,12 @@ untracked.
 
 Recent phases:
 
-* Phase 9: Release and install polish, done.
 * Phase 10: Execution-layer failure forensics, done.
+* Phase 11: Native Windows support, done.
 
 Active phase:
 
-* Phase 11: Native Windows support, done.
+* Phase 12: Terminal workspace autosplit, active.
 
 Upcoming phases:
 
@@ -33,6 +33,13 @@ Upcoming phases:
 * Phase 8: Dashboard usability refinement, planned.
 
 Active phase slices:
+
+* Slice 17: Add autosplit core, WT, and tmux, done.
+* Slice 18: Add autosplit GNU screen backend, done.
+* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
+* Slice 21: Pre-merge review and trunk merge, active.
+
+Phase 11 slices, all done:
 
 * Slice 11: Fix Windows runtime blockers, done.
 * Slice 12: Add Windows process identity, done.
@@ -44,24 +51,21 @@ Active phase slices:
 
 ## Current Work
 
-Phase 11 runs on `feature/windows-platform-support`. The specification is
-`docs/specifications/windows-platform-support.md`, and the approved proposal
-records the operator's decisions.
+Phase 12 runs on `feature/ubersight-autosplit`, which merges
+`feature/windows-platform-support` as Phase 11 slices land. The
+specification is `docs/specifications/ubersight-autosplit.md`, and the
+approved proposal records the operator's decisions.
 
-Done:
-- Slices 11 and 12: runtime blockers and process identity.
-- Slice 13: `ubersight --supervise` and a Windows-capable `ubersight-stop`.
-- Slice 14: Windows network probes, `Ethernet (<LAN name>)`, and the
-  redesigned location editor.
-- Slice 15: `install.ps1` and the Windows stage two.
-- Slice 16: Windows test parity; the remaining skips are permanent
-  POSIX-only cases with explicit reasons.
-- Slice 20, added after the Linux test run: `Ethernet (<LAN name>)` on
-  wired Linux hosts, read from `/sys/class/net`.
-
-The Linux test run passed on 2026-10-14. Remaining before `trunk`: the
-pre-merge review.
-
-Phase 12 (`ubersight-autosplit`) builds on this branch from
-`feature/ubersight-autosplit`. The Expletives terminal-library port and the
-FieldManual migration stay out of this branch.
+Status:
+- All six autosplit backends are implemented with unit-tested plans.
+- Windows Terminal was verified live by the operator.
+- The dashboard pane runs under `ubersight --supervise`, so
+  `ubersight-stop` restarts it in place.
+- tmux and GNU screen were verified live on the WSL2 Rocky and Fedora
+  bench, locally and over SSH, and tmux over mosh. WezTerm, kitty, and
+  Terminator await the operator's workstation and are backlogged.
+- Phase 11 passed its Linux test run on 2026-10-14. Slice 20, the Linux
+  `Ethernet (<LAN name>)` mark, was added afterwards.
+- The operator approved merging both branches to `trunk` after a
+  multi-angle review (Slice 21). The review's findings are fixed on both
+  branches; the merge comes next.

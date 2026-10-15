@@ -4,6 +4,22 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T21:55:00-07:00 - Fixed the autosplit findings of the
+  pre-merge review:
+  - tmux `#` formats in the project path no longer start panes in $HOME;
+  - a WezTerm mux server is recognized under its truncated `/proc` name;
+  - a non-UTF-8 ancestor name no longer crashes detection;
+  - Windows Terminal receives quoted, backslash-ended, empty, and `;`
+    arguments intact;
+  - IDE terminals (VS Code, JetBrains) refuse inherited emulator markers;
+  - a step that cannot start reports its step number;
+  - `--json` requires `--dry-run`, `sshd-session.exe` marks a remote
+    session, and `ubersight-autosplit` never runs a program from the
+    project directory on Windows;
+  - Terminator's shell and custom-command limits are documented, and every
+    autosplit callable has a docstring.
+  Owner: Claude. Requestor: operator.
+
 * 2026-10-14T21:50:00-07:00 - Fixed the Phase 11 findings of the
   multi-angle pre-merge review (9 agents; every finding adversarially
   verified):
@@ -40,6 +56,14 @@ and ISO 8601 timestamps.
   as WSL2's do not. Also fixed a bug on both platforms: moving from WiFi to
   a cable kept showing the cached WiFi name and never showed `Ethernet`.
   Verified on Windows and on WSL2 Rocky and Fedora. Owner: Claude.
+  Requestor: operator.
+
+* 2026-10-14T19:18:00-07:00 - Finished autosplit Slices 17 and 18
+  (`ubersight-autosplit` core, Windows Terminal, tmux, and GNU screen).
+  Windows Terminal was verified by the operator; tmux and screen were
+  verified on WSL2 Rocky and Fedora, locally and over SSH, and tmux over
+  mosh. Slice 19's WezTerm, kitty, and Terminator backends are
+  implemented and await live checks. Owner: Claude and operator.
   Requestor: operator.
 
 * 2026-10-14T19:16:00-07:00 - Verified Phase 11 (native Windows support) on

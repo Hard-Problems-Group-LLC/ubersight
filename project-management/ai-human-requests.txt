@@ -10,6 +10,22 @@ owner/requestor, and ISO 8601 timestamps.
 Pending Requests
 ----------------
 
+* 2026-10-13T23:59:58-07:00 - Verify `ubersight-autosplit` live on Linux,
+  which the Windows workstation cannot exercise:
+  - check tmux, GNU screen, WezTerm, kitty (with `allow_remote_control`),
+    and Terminator 2.1.2 or newer;
+  - repeat the tmux and screen checks over SSH and over mosh;
+  - confirm that a plain SSH or mosh shell without a multiplexer is refused
+    with a clear message.
+  Use `--dry-run` first to see each plan. Specification:
+  `docs/specifications/ubersight-autosplit.md`. Requestor: Claude.
+  Owner: operator.
+  2026-10-14T19:18:00-07:00 - On the operator's WSL2 bench, Claude
+  verified tmux and GNU screen locally and over SSH, tmux over mosh, and
+  the refusal of plain SSH and mosh shells. See the specification's Live
+  Verification section. WezTerm, kitty, and Terminator remain, as does
+  screen over mosh.
+
 Active Requests
 ---------------
 
