@@ -14,3 +14,6 @@ status notes, blockers, and ISO 8601 timestamps.
   then merging to `trunk`.
   2026-10-14T19:16:00-07:00 - The Linux test run passed on WSL2 Rocky
   10.2 and Fedora 44 after three small fixes. Next: merge to `trunk`.
+  2026-10-14T20:42:00-07:00 - The operator approved the merge after
+  Slice 20 (the Linux wired-network mark), which is done, and a
+  multi-angle review, which is next.

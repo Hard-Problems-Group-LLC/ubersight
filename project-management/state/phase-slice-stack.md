@@ -40,6 +40,7 @@ Active phase slices:
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, done.
+* Slice 20: Add Linux wired-network mark, done.
 
 ## Current Work
 
@@ -55,8 +56,11 @@ Done:
 - Slice 15: `install.ps1` and the Windows stage two.
 - Slice 16: Windows test parity; the remaining skips are permanent
   POSIX-only cases with explicit reasons.
+- Slice 20, added after the Linux test run: `Ethernet (<LAN name>)` on
+  wired Linux hosts, read from `/sys/class/net`.
 
-Remaining before `trunk`: the operator's Linux test run.
+The Linux test run passed on 2026-10-14. Remaining before `trunk`: the
+pre-merge review.
 
 Phase 12 (`ubersight-autosplit`) builds on this branch from
 `feature/ubersight-autosplit`. The Expletives terminal-library port and the

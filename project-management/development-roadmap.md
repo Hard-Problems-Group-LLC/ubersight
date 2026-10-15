@@ -41,3 +41,4 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, done.
+* Slice 20: Add Linux wired-network mark, done.

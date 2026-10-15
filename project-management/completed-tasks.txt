@@ -4,6 +4,15 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T20:42:00-07:00 - Added the Linux wired-network mark (Slice
+  20). A wired Linux host now shows `Ethernet (<LAN name>)`, judged from
+  `/sys/class/net`: a physical Ethernet NIC, or a bridge, bond, or VLAN on
+  one, counts; WiFi, mobile broadband, tunnels, and paravirtual NICs such
+  as WSL2's do not. Also fixed a bug on both platforms: moving from WiFi to
+  a cable kept showing the cached WiFi name and never showed `Ethernet`.
+  Verified on Windows and on WSL2 Rocky and Fedora. Owner: Claude.
+  Requestor: operator.
+
 * 2026-10-14T19:16:00-07:00 - Verified Phase 11 (native Windows support) on
   Linux: WSL2 Rocky 10.2 and Fedora 44, fresh clones, a Linux-only `PATH`.
   Both install modes, the full suite, the quality gate, and live

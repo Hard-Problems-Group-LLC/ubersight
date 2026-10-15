@@ -161,7 +161,8 @@ The Codex collaboration pattern is:
 ## Safety Boundaries
 
 The local memory commands do not need elevated permissions. Observation may
-call local tools such as `nmcli`, `iw`, and `ip`. If geolocation is enabled,
+call local tools such as `nmcli`, `iw`, and `ip`, and on Linux it reads
+`/sys/class/net` to tell a cable from WiFi. If geolocation is enabled,
 the observation path may contact the same public IP-geolocation providers
 used by Ubersight. Ubersight can also use BeaconDB as an optional WiFi BSSID
 fallback for unknown networks. Use `--no-geolocate` when working
