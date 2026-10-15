@@ -4,14 +4,5 @@ Track tasks that are actively being implemented. Keep this file small and
 current. Use the same asterisk-plus-blank-line format as the backlog, with
 status notes, blockers, and ISO 8601 timestamps.
 
-* 2026-10-13T23:59:58-07:00 - Terminal workspace autosplit (roadmap Phase
-  12): `ubersight-autosplit`. Branch `feature/ubersight-autosplit`, which
-  merges `feature/windows-platform-support`. Specification:
-  `docs/specifications/ubersight-autosplit.md`. Owner: Claude and
-  operator. Requestor: operator.
-  2026-10-14T21:55:00-07:00 - Slices 17 and 18 are done. Slice 19's
-  WezTerm, kitty, and Terminator backends await live checks on the
-  operator's workstation (backlogged). Slice 21, the pre-merge review,
-  has its findings fixed; the merge to `trunk` is next.
-  2026-10-14T22:34:00-07:00 - Merged to `trunk` together with Phase 11.
-  Only Slice 19's live checks remain.
+No task is in progress. Phase 13000 (live terminal verification) waits in
+the backlog for the operator's Linux workstation.

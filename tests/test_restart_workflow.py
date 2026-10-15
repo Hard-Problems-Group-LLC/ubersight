@@ -1,4 +1,4 @@
-"""Tests for the cross-platform stop and restart workflow (Slice 13).
+"""Tests for the cross-platform stop and restart workflow (Phase 11000, Slice 3000).
 
 These cover the dashboard's restart signal, the `--supervise` loop, and the
 `ubersight-stop` helper. Tests marked ``windows_only`` use real named events

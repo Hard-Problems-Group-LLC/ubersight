@@ -49,6 +49,17 @@ produced them.
   `project-management/development-roadmap.md`. That roadmap document should
   always exist; create or restore it before relying on Ubersight status when
   it is missing.
+- Number phases in thousands (Phase 1000, 2000, ...) and number slices in
+  thousands within each phase, starting again at Slice 1000. The gaps leave
+  room to insert work, such as Slice 1500. Outside its phase, name a slice
+  with its phase, for example Phase 11000 Slice 4000.
+- Pass bare numbers to the status writer and list rows in roadmap order;
+  the dashboard adds the words "Phase" and "Slice" and shows rows in the
+  order given.
+- When part of a slice has to wait, for example for operator time, but
+  nothing is stuck, move it to a later slice or phase, or add a new one
+  where it belongs. Update the roadmap and the Ubersight status together,
+  and never leave a slice active just to wait.
 - Keep phase titles short. Source phase titles as titles only, not prose
   descriptions or state-bearing labels.
 - Keep slice titles to one display row. Ubersight clips long slice text
