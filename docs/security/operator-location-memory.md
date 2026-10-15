@@ -83,8 +83,12 @@ A known-location record has this shape:
 ```
 
 The `ssids` field is literal because the file is already local-only and a
-literal SSID is useful for human maintenance. BSSIDs and gateway MAC addresses
-are stored only as salted hashes. Local subnets and coarse geolocation are
+literal SSID is useful for human maintenance. The matchers store BSSIDs and
+gateway MAC addresses only as salted hashes. Each record's
+`last_observation`, however, keeps the raw observation it was learned from,
+including the BSSID, router MACs, SSID, and subnets, as local evidence like
+`observations.jsonl`. That is one more reason never to copy or sync this
+file. Local subnets and coarse geolocation are
 weak matchers; they should not identify a location by themselves unless an
 operator deliberately lowers a record's threshold.
 
@@ -93,7 +97,8 @@ operator deliberately lowers a record's threshold.
 router's MAC address stands in for an SSID, and a gateway match alone
 scores 100, enough for the default threshold of 80. The location editor
 shows the raw router MAC and access-point BSSID on screen so the operator
-can recognize them. Only the salted hashes are stored.
+can recognize them. The matchers it saves hold only their salted hashes;
+the raw values stay in `last_observation`, as described above.
 
 ## Matching
 

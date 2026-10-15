@@ -87,10 +87,19 @@ def _known_sensitive_terms(
 
 
 def _git_grep(term: str) -> list[str]:
+    """Return `git grep` hits for one term in the current checkout's files.
+
+    Git prints file bytes as they are, so the output is decoded as UTF-8
+    with replacement; the Windows default code page would fail on some
+    UTF-8 text and lose the very match being reported.
+    """
+
     result = subprocess.run(
         ["git", "grep", "-n", "--fixed-strings", "--", term],
         cwd=Path.cwd(),
-        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -217,6 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the local-memory management command."""
 
+    ubersight.harden_windows_executable_search()
     parser = build_parser()
     args = parser.parse_args(argv)
     memory_path = Path(args.memory)

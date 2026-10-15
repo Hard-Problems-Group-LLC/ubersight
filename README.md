@@ -127,4 +127,4 @@ On Windows, `windows-curses` is installed automatically as a
 platform-specific dependency. Background-job status lives under the
 project's ignored `.local/ubersight/background-jobs` directory. See
 `docs/scripts/ubersight.py.md` for the side-pane recipe, process-identity
-rules for job writers, and the features that are not yet ported.
+rules for job writers, and the known Windows limits.

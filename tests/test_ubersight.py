@@ -1735,8 +1735,8 @@ def test_colored_header_and_footer_lines_paint_full_width() -> None:
     assert ubersight._curses_line_text("(R)efresh  (E)nter", 30) == (
         "(R)efresh  (E)nter".ljust(30)
     )
-    assert ubersight._curses_line_text("mheck@diogenes", 30, band=True) == (
-        "mheck@diogenes".ljust(30)
+    assert ubersight._curses_line_text("operator@example-host", 30, band=True) == (
+        "operator@example-host".ljust(30)
     )
     assert ubersight._curses_line_text("PROJECT: UBERSIGHT", 30) == (
         "PROJECT: UBERSIGHT"
@@ -1813,20 +1813,27 @@ def test_only_the_public_opsec_alarm_centers_its_first_row() -> None:
 
 
 def test_identity_rows_show_user_at_host_then_network() -> None:
-    wifi = ubersight.OperatorLocationStatus("diogenes", "mheck", "FixtureNet", "x")
+    wifi = ubersight.OperatorLocationStatus(
+        "example-host", "operator", "FixtureNet", "x"
+    )
     wired = ubersight.OperatorLocationStatus(
-        "diogenes", "mheck", "unknown", "x", wired=True, network_label="Example Wired LAN"
+        "example-host",
+        "operator",
+        "unknown",
+        "x",
+        wired=True,
+        network_label="Example Wired LAN",
     )
 
     assert ubersight._operator_identity_lines(wifi, 40) == (
-        "mheck@diogenes",
+        "operator@example-host",
         "WIFI: FixtureNet",
     )
     assert ubersight._operator_identity_lines(wired, 40) == (
-        "mheck@diogenes",
+        "operator@example-host",
         "Ethernet (Example Wired LAN)",
     )
-    assert ubersight._operator_identity_lines(wired, 10)[0] == "mheck@d..."
+    assert ubersight._operator_identity_lines(wired, 10)[0] == "operato..."
 
 
 def test_identity_rows_are_styled_from_data_not_text() -> None:
@@ -1839,13 +1846,15 @@ def test_identity_rows_are_styled_from_data_not_text() -> None:
             return index * 100
 
     assert ubersight._curses_attr_for_line(
-        FakeCurses, "mheck@diogenes", True, ubersight.HOST_STATE
+        FakeCurses, "operator@example-host", True, ubersight.HOST_STATE
     ) == FakeCurses.color_pair(10)
     assert (
-        ubersight._curses_attr_for_line(FakeCurses, "mheck@diogenes", True)
+        ubersight._curses_attr_for_line(FakeCurses, "operator@example-host", True)
         == FakeCurses.A_NORMAL
     )
-    assert ubersight._curses_line_text("mheck@diogenes", 20) == "mheck@diogenes"
+    assert ubersight._curses_line_text("operator@example-host", 21) == (
+        "operator@example-host"
+    )
 
 
 def test_tailscale_status_colors_reflect_state() -> None:
@@ -2111,7 +2120,7 @@ def test_collect_process_tree_uses_fake_proc(tmp_path: Path) -> None:
 
 def test_stop_helper_matches_legacy_and_installed_dashboard_commands() -> None:
     assert stop_ubersight._is_ubersight_dashboard_command(
-        "python scripts/ubersight.py --once"
+        "python scripts/ubersight.py --refresh-ms 500"
     )
     assert stop_ubersight._is_ubersight_dashboard_command(
         "/repo/.venv/bin/python /repo/.venv/bin/ubersight"

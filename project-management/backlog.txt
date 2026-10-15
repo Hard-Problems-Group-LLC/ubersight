@@ -9,31 +9,18 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   and its interaction with proposals and ACP. Owner: operator and Codex.
   Requestor: operator. No active blocker.
 
-* 2026-10-13T22:58:00-07:00 - Finish native Windows support (roadmap Phase
-  11) after Slices 11 and 12: Slice 13 stop and restart workflow, Slice 14
-  Windows network and location probes, Slice 15 Windows install path, and
-  Slice 16 Windows test-suite parity. Specification:
-  `docs/specifications/windows-platform-support.md`. Owner: Claude and
-  operator. Requestor: operator. No active blocker.
-  Slice 16 must remove the temporary `POSIX_INSTALLER_ONLY` Windows skips
-  in `tests/test_bootstrap.py` and `tests/test_install_scope.py`.
-  2026-10-14T00:24:00-07:00 - Slice 15 landed the Windows install path
-  and removed the two `tests/test_install_scope.py` skips; 15 remain in
-  `tests/test_bootstrap.py`.
-  2026-10-14T00:44:00-07:00 - Slice 13 landed the cross-platform stop
-  and restart workflow (`ubersight --supervise` and a Windows-capable
-  `ubersight-stop`). Slices 14 and 16 remain.
-  2026-10-14T01:55:00-07:00 - Slice 14 landed:
-  - Windows gateway, subnet, and WiFi probes;
-  - wired detection and the `Ethernet (<LAN name>)` display;
-  - the `user@host` footer rows;
-  - the redesigned location editor.
-  Only Slice 16 remains. Per-user location state is tracked as a bug.
-  2026-10-14T02:16:00-07:00 - Slice 16 landed. Five installer tests now
-  run on Windows. Ten keep permanent, explicit POSIX-only skips: nine
-  for pyenv flows and one for the shell prerequisite installer. Phase
-  11 is complete pending the operator's Linux test run and the merge
-  to `trunk`.
+* 2026-10-14T21:50:00-07:00 - Add a `.gitattributes` that keeps shell
+  scripts LF (`*.sh text eol=lf`) in Windows checkouts. With Git for
+  Windows' default `core.autocrlf=true`, `install.sh` and the other
+  scripts check out as CRLF and fail with `\r` errors when the same
+  checkout is used from WSL or Git Bash. Found by the Phase 11/12
+  pre-merge review. Owner: Claude. Requestor: Claude. No active blocker.
+
+* 2026-10-14T21:50:00-07:00 - Give every test function a docstring. The
+  project rule documents every callable, but most test functions on
+  `trunk` and in several Phase 11 test files describe themselves only by
+  name; the installer and autosplit tests now follow the rule. Owner:
+  Claude. Requestor: Claude. No active blocker.
 
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own

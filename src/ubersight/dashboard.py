@@ -10,9 +10,11 @@ reads prompts, transcripts, or repository source content.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import ipaddress
 import json
+import math
 import os
 import re
 import signal
@@ -20,11 +22,12 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -181,8 +184,11 @@ class OperatorLocationStatus:
     network_observed_at: datetime | None = None
     network_fingerprint: str = ""
     wired: bool = False
-    # Label of the matched location-memory record, as named with `E`.
+    # The matched location-memory record's LAN name (`lan_name`), set in
+    # the `E` editor's "LAN name" field and shown as `Ethernet (<name>)`.
     network_label: str = ""
+    # When a cheap probe last ran without identifying the network.
+    network_probed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +288,20 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
+def harden_windows_executable_search() -> None:
+    """Stop Windows from running commands found in the current directory.
+
+    For a bare name such as `route`, `ip`, or `git`, CreateProcess looks in
+    the current directory before System32 and `PATH`. Ubersight runs from
+    project checkouts, so a planted `route.exe` or `ip.exe` there would run
+    on every network probe. Setting this variable in our own environment
+    turns that lookup off for every command this process starts.
+    """
+
+    if _is_windows():
+        os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
+
+
 def _configured_git_ssh_command(cwd: Path | None) -> str:
     """Return the repository's `core.sshCommand`, or an empty string."""
 
@@ -340,6 +360,7 @@ def _run_command(
     replacement so an unexpected byte cannot raise.
     """
 
+    harden_windows_executable_search()
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     # Read-only probes such as `git status` otherwise take `.git/index.lock`
@@ -1346,6 +1367,7 @@ def _coerce_location_status(raw: dict[str, Any]) -> OperatorLocationStatus | Non
         network_fingerprint=str(raw.get("network_fingerprint", "")).strip(),
         wired=raw.get("wired") is True,
         network_label=str(raw.get("network_label", "")).strip(),
+        network_probed_at=_parse_timestamp(raw.get("network_probed_at")),
     )
 
 
@@ -1381,9 +1403,33 @@ def _write_location_cache(path: Path, status: OperatorLocationStatus) -> None:
             status.network_observed_at or status.updated_at or _local_now()
         ).isoformat(timespec="seconds"),
     }
+    if status.network_probed_at is not None:
+        payload["network_probed_at"] = status.network_probed_at.isoformat(
+            timespec="seconds"
+        )
     atomic_files.atomic_write_text(
         path, json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
+
+
+def _run_each_command_once(run_command: Any) -> Any:
+    """Return `run_command` wrapped to run each distinct command only once.
+
+    One observation asks `netsh` and `route print` the same question several
+    times, and on Windows each run costs a tenth of a second or more.
+    """
+
+    results: dict[tuple[str, ...], CommandResult] = {}
+
+    def run(args: Sequence[str], **kwargs: Any) -> CommandResult:
+        """Run `args` the first time, then replay that result."""
+
+        key = tuple(args)
+        if key not in results:
+            results[key] = run_command(args, **kwargs)
+        return results[key]
+
+    return run
 
 
 def observe_operator_location(
@@ -1402,6 +1448,7 @@ def observe_operator_location(
     never depend on the host's own network devices.
     """
 
+    run_command = _run_each_command_once(run_command)
     network_estimate = (
         _geolocation_from_ip(urlopen_func=urlopen_func) if geolocate else None
     )
@@ -2551,6 +2598,9 @@ def load_or_refresh_operator_location(
         ):
             if network_age is not None and network_age <= network_max_age_seconds:
                 return cached
+            probe_age = _timestamp_age_seconds(cached.network_probed_at, now)
+            if probe_age is not None and probe_age <= network_max_age_seconds:
+                return cached
             network_observation = observe_operator_location(
                 run_command=run_command,
                 geolocate=False,
@@ -2558,12 +2608,19 @@ def load_or_refresh_operator_location(
                 fallback_ssid="",
             )
             # An unknown SSID usually means a failed WiFi probe, so the
-            # cache wins; on a cable it is the normal state.
+            # cache wins; on a cable it is the normal state. A cached cable
+            # that this observation no longer sees is not trusted, though.
+            # The failed probe is not proof the operator stayed put, so
+            # `network_observed_at` keeps aging. `network_probed_at` only
+            # spaces out the retries, which cost about a second on Windows.
             if (
                 network_observation.wifi_ssid == "unknown"
                 and not network_observation.wired
+                and not cached.wired
             ):
-                return cached
+                probed = replace(cached, network_probed_at=now)
+                _write_location_cache(cache_path, probed)
+                return probed
             if _same_operator_network(cached, network_observation):
                 refreshed_network = replace(
                     cached,
@@ -2764,6 +2821,8 @@ def _collect_windows_process_tree(
     creation_times: dict[int, int | None] = {}
 
     def creation_time(pid: int) -> int | None:
+        """Return `pid`'s creation time, probing each process only once."""
+
         if pid not in creation_times:
             creation_times[pid] = probe(pid).creation_filetime
         return creation_times[pid]
@@ -3008,7 +3067,7 @@ def _network_display_segment(status: OperatorLocationStatus) -> str:
     """Return the footer's network segment: the WiFi name, or the wired LAN.
 
     On a cable the router stands in for an SSID, and the LAN is shown by
-    the label the operator gave this place in the location editor.
+    the LAN name the operator gave it in the location editor.
     """
 
     if status.wired:
@@ -3819,6 +3878,12 @@ def _location_entry_defaults(
         )
     default_threshold = 100.0 if _network_is_public(observation.wifi_ssid) else 80.0
     threshold = _float_or_none(record.get("confidence_threshold")) or default_threshold
+    # Offices often share an SSID, so a match on it alone may be another
+    # site's record. Saving then goes by Place name instead of renaming
+    # that record; only an access point or router pins the record.
+    site_specific = match is not None and bool(
+        {"bssid", "gateway"} & set(match.reasons)
+    )
     return LocationEntryDefaults(
         label=str(record.get("label", "")).strip(),
         fine_location=str(display.get("fine", "")).strip(),
@@ -3827,7 +3892,7 @@ def _location_entry_defaults(
         matched=bool(record),
         stable_identity=bool(observation.wifi_bssid or observation.gateway_macs),
         lan_name=str(record.get("lan_name", "")).strip(),
-        record_id=str(record.get("id", "")).strip(),
+        record_id=str(record.get("id", "")).strip() if site_specific else "",
     )
 
 
@@ -3852,7 +3917,7 @@ def _location_entry_header(
     """Return the editor title and the network, help, and status rows.
 
     Raw router and access-point addresses are shown here for the operator
-    to recognize; location memory stores only their salted hashes.
+    to recognize; location memory matches on their salted hashes.
     """
 
     routers = ", ".join(observation.gateway_macs)
@@ -3904,6 +3969,8 @@ def _apply_location_entry_key(
     """
 
     def code(name: str) -> Any:
+        """Return a curses key code, or None where this curses lacks it."""
+
         return getattr(curses_module, name, None)
 
     if key in ("\x1b", 27):
@@ -4001,7 +4068,8 @@ def _save_location_entry(
         return "No access point or router captured; cannot save."
     if opsec_level not in OPSEC_LEVELS:
         return "OPSEC must be private-trusted, private, public, or unknown."
-    if threshold is None or threshold <= 0:
+    # `nan` and `inf` parse as floats, but a record with either never matches.
+    if threshold is None or not math.isfinite(threshold) or threshold <= 0:
         return "Threshold must be a positive number."
     location_memory.learn_location_memory(
         place,
@@ -4107,6 +4175,8 @@ class RestartSignal:
     """
 
     def __init__(self) -> None:
+        """Start unrequested and not yet listening; see `install`."""
+
         self._requested = False
         self._event: windows_processes.RestartEvent | None = None
         self._previous_handler: Any = None
@@ -4152,6 +4222,29 @@ def _supervisor_log(message: str) -> None:
     print(f"[ubersight-supervise] {message}", file=sys.stderr, flush=True)
 
 
+@contextlib.contextmanager
+def _child_owns_ctrl_c() -> Iterator[None]:
+    """Let the supervised dashboard alone handle Ctrl+C on POSIX.
+
+    Ctrl+C reaches the supervisor and the dashboard together. Unhandled,
+    the supervisor's `subprocess.run` would kill the dashboard 0.25 s later,
+    possibly before curses restores the terminal. A do-nothing handler,
+    unlike `SIG_IGN`, is reset when the child starts, so the dashboard
+    still gets its KeyboardInterrupt, exits 130, and ends supervision.
+    Windows waits are not interrupted this way, so Windows is unchanged.
+    """
+
+    # Only the main thread may install signal handlers.
+    if _is_windows() or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def run_supervised(
     child_args: Sequence[str],
     *,
@@ -4172,7 +4265,8 @@ def run_supervised(
         interrupted.add(-signal.SIGINT)
     while True:
         try:
-            completed = run(command, check=False)
+            with _child_owns_ctrl_c():
+                completed = run(command, check=False)
         except KeyboardInterrupt:
             return KEYBOARD_INTERRUPT_EXIT_CODE
         status = completed.returncode
@@ -4392,8 +4486,11 @@ def _normalized_status_for_write(status: UbersightStatus) -> UbersightStatus:
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser for Ubersight and status-writer modes."""
 
+    # No abbreviations: `--sup` would turn on supervision without matching
+    # the literal `--supervise` that `main` removes from the child's
+    # arguments, so every child would start another supervisor.
     parser = argparse.ArgumentParser(
-        description="Run Ubersight in a terminal side pane."
+        description="Run Ubersight in a terminal side pane.", allow_abbrev=False
     )
     parser.add_argument(
         "--status", default=str(DEFAULT_STATUS_PATH), help="agent status JSON path"
@@ -4496,9 +4593,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--background-job-dir",
         default=None,
         help=(
-            "background-job status directory; default is derived from "
-            "--project-name as XDG_RUNTIME_DIR/ubersight/<project>/"
-            "background-jobs"
+            "background-job status directory; default on POSIX is derived "
+            "from --project-name as XDG_RUNTIME_DIR/ubersight/<project>/"
+            "background-jobs, and on Windows is "
+            r".local\ubersight\background-jobs in the current directory"
         ),
     )
     parser.add_argument(
@@ -4574,6 +4672,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run Ubersight or write one status snapshot."""
 
+    harden_windows_executable_search()
     parser = build_parser()
     raw_args = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_args)

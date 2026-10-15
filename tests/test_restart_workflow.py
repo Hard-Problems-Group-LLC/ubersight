@@ -191,10 +191,76 @@ def test_main_supervise_strips_flag_and_rejects_snapshot_modes(
     assert "--supervise cannot be combined" in capsys.readouterr().err
 
 
+def test_supervise_cannot_be_abbreviated(capsys) -> None:
+    """`--sup` would start a supervisor whose child supervises again."""
+
+    with pytest.raises(SystemExit):
+        ubersight.build_parser().parse_args(["--sup"])
+    assert "unrecognized arguments: --sup" in capsys.readouterr().err
+
+
+CHILD_REPORTS_CTRL_C_HANDLER = (
+    "import signal, sys; "
+    "sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.default_int_handler "
+    "else 3)"
+)
+
+
+def test_supervisor_leaves_ctrl_c_to_the_dashboard(monkeypatch) -> None:
+    """While the child runs, Ctrl+C cannot interrupt the supervisor's wait.
+
+    The child must still get Python's normal KeyboardInterrupt handler,
+    which an ignored (`SIG_IGN`) signal would have suppressed.
+    """
+
+    monkeypatch.setattr(ubersight, "_is_windows", lambda: False)
+    before = signal.getsignal(signal.SIGINT)
+    seen: list[object] = []
+
+    def run(command, **kwargs):
+        """Check the handler, run a real child, then report Ctrl+C."""
+
+        handler = signal.getsignal(signal.SIGINT)
+        seen.append(handler)
+        handler(signal.SIGINT, None)
+        child = subprocess.run(
+            [BASE_PYTHON, "-c", CHILD_REPORTS_CTRL_C_HANDLER], check=False
+        )
+        assert child.returncode == 0
+        return subprocess.CompletedProcess(command, 130)
+
+    assert ubersight.run_supervised([], run=run, sleep=lambda _: None) == 130
+    assert seen[0] not in (before, signal.SIG_IGN, signal.SIG_DFL)
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_checkout_launcher_exports_its_import_root() -> None:
+    """A supervised child of `scripts/ubersight.py` imports the same tree."""
+
+    launcher = Path(__file__).resolve().parents[1] / "scripts" / "ubersight.py"
+    probe = (
+        "import os, runpy, sys; "
+        f"runpy.run_path({str(launcher)!r}, run_name='probe'); "
+        "print(os.environ['PYTHONPATH'].split(os.pathsep)[0])"
+    )
+
+    completed = subprocess.run(
+        [BASE_PYTHON, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONPATH": "elsewhere"},
+    )
+
+    assert Path(completed.stdout.strip()) == launcher.parents[1] / "src"
+
+
 # ubersight-stop ------------------------------------------------------------
 
 
 def test_dashboard_command_matching_excludes_supervisors() -> None:
+    """Supervisors and other Ubersight commands are not dashboards."""
+
     assert stop_ubersight._is_ubersight_dashboard_command(
         "/repo/.venv/bin/python -m ubersight --refresh-ms 500"
     )
@@ -206,7 +272,127 @@ def test_dashboard_command_matching_excludes_supervisors() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/repo/.venv/bin/python -m ubersight --refresh-ms 500",
+        "/usr/bin/python3 -u /home/op/.local/bin/ubersight --no-color",
+        "/usr/bin/python3.12 scripts/ubersight.py",
+        "/usr/bin/python3 -X dev scripts/ubersight.py",
+        "/home/op/.local/bin/ubersight",
+    ],
+)
+def test_dashboard_command_matching_finds_dashboards(command: str) -> None:
+    """The module, the launcher, and the checkout script all count."""
+
+    assert stop_ubersight._is_ubersight_dashboard_command(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "vim scripts/ubersight.py",
+        "ruff check scripts/ubersight.py",
+        "/repo/.venv/bin/python -m black scripts/ubersight.py",
+        "code /home/op/src/ubersight",
+        "bash -c cd /home/op/src/ubersight && make",
+        "/repo/.venv/bin/python /repo/.venv/bin/ubersight --write-status",
+        "python scripts/ubersight.py --once",
+        "python -c import ubersight",
+    ],
+)
+def test_dashboard_command_matching_ignores_tools_and_one_shots(
+    command: str,
+) -> None:
+    """Editors, linters, shells, and one-shot runs are never signaled."""
+
+    assert not stop_ubersight._is_ubersight_dashboard_command(command)
+
+
+def write_fake_proc_entry(proc_root: Path, pid: int, uid: int, command: str) -> None:
+    """Add one process with `status` and NUL-separated `cmdline` files."""
+
+    entry = proc_root / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "status").write_text(f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    (entry / "cmdline").write_bytes(command.replace(" ", "\0").encode() + b"\0")
+
+
+def test_posix_discovery_drops_processes_whose_identity_changed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A PID reused mid-scan, or one without an identity, is never kept."""
+
+    monkeypatch.setattr(os, "getuid", lambda: 1000, raising=False)
+    for pid in (41, 42, 43):
+        write_fake_proc_entry(tmp_path, pid, 1000, "python -m ubersight")
+    reads = {41: ["5", "5"], 42: ["5", "6"], 43: ["", ""]}
+    monkeypatch.setattr(
+        ubersight, "_process_start_ticks", lambda pid: reads[pid].pop(0)
+    )
+
+    found = stop_ubersight.find_ubersight_processes(proc_root=tmp_path)
+
+    assert found == (stop_ubersight.UbersightProcess(41, "python -m ubersight", "5"),)
+
+
+def test_windows_discovery_drops_a_dashboard_that_exits_mid_scan(
+    monkeypatch,
+) -> None:
+    """The restart event must outlast the identity read."""
+
+    entries = tuple(
+        windows_processes.ProcessEntry(pid, 1, "python.exe") for pid in (31, 33, 34)
+    )
+    monkeypatch.setattr(
+        ubersight, "_process_start_ticks", lambda pid: "" if pid == 34 else f"t{pid}"
+    )
+    answers = {31: [True, True], 33: [True, False], 34: [True, True]}
+
+    found = stop_ubersight.find_windows_dashboards(
+        snapshot=lambda: entries, has_restart_event=lambda pid: answers[pid].pop(0)
+    )
+
+    assert found == (stop_ubersight.UbersightProcess(31, "python.exe", "t31"),)
+
+
+def test_force_stop_needs_a_recorded_identity(monkeypatch) -> None:
+    """Without one, the PID alone could name any process by now."""
+
+    monkeypatch.setattr(stop_ubersight, "_is_running", lambda process: True)
+    monkeypatch.setattr(
+        windows_processes,
+        "terminate_process",
+        lambda *args: pytest.fail("terminated without an identity"),
+    )
+    monkeypatch.setattr(
+        os, "kill", lambda *args: pytest.fail("signaled without an identity")
+    )
+
+    assert not stop_ubersight.force_stop(
+        stop_ubersight.UbersightProcess(51, "python.exe", "")
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_posix_restart_request_survives_a_permission_error(monkeypatch) -> None:
+    """A process owned by someone else now is reported, not raised."""
+
+    def denied(pid, signum):
+        """Refuse the signal as the kernel would for another user's PID."""
+
+        raise PermissionError
+
+    monkeypatch.setattr(os, "kill", denied)
+
+    assert not stop_ubersight.request_restart(
+        stop_ubersight.UbersightProcess(61, "python -m ubersight", "5")
+    )
+
+
 def fake_processes() -> tuple[stop_ubersight.UbersightProcess, ...]:
+    """Return two discovered dashboards with distinct identities."""
+
     return (
         stop_ubersight.UbersightProcess(11, "python.exe", "100"),
         stop_ubersight.UbersightProcess(22, "python.exe", "200"),

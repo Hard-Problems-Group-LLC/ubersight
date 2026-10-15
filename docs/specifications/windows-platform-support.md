@@ -155,14 +155,32 @@ replaces `scripts/ubersight_wrapper.sh` on every platform. The wrapper
 remains for existing POSIX setups and still restarts after any exit,
 including Q.
 
+Details:
+
+- **No abbreviations:** `ubersight` options cannot be abbreviated. An
+  abbreviation such as `--sup` would turn on supervision without matching
+  the literal `--supervise` that is removed from the child's arguments, so
+  every child would start another supervisor.
+- **Ctrl+C on POSIX:** Ctrl+C reaches the supervisor and the dashboard
+  together. While the dashboard runs, the supervisor leaves it alone, so
+  the dashboard can restore the terminal before it exits with status 130.
+- **Source checkouts:** `scripts/ubersight.py` puts the checkout's `src` on
+  `PYTHONPATH`, so its supervised child imports the same code.
+
 ### `ubersight-stop`
 
 - **Finding dashboards:**
   - On Windows, it walks a process snapshot and opens each process's
     restart event; only dashboards create one.
-  - On POSIX, it keeps the `/proc` scan of same-user processes whose
-    command names `ubersight` or `ubersight.py`.
-  - Supervisor processes and the helper itself are never matched.
+  - On POSIX, it scans `/proc` for same-user dashboards: `python -m
+    ubersight`, or a Python interpreter running a script named `ubersight`
+    or `ubersight.py`. Editors, linters, and shells that only name such a
+    file are not matched.
+  - Supervisors, `--once` and `--write-status` runs, and the helper itself
+    are never matched.
+  - A process is kept only if its creation time reads the same before and
+    after it is identified (on Windows, if its restart event still exists
+    after the read), so a PID reused mid-scan is dropped.
 - **Default action:** it sends restart requests, then waits up to
   `--wait-seconds` (default 5) for each matched dashboard to exit. It exits
   with status 0 when every dashboard exited, and status 1 when some are
@@ -171,9 +189,10 @@ including Q.
   signaled.
 - **`--force`:** after the wait, ends remaining dashboards:
   `TerminateProcess` on Windows, `SIGKILL` on POSIX. It acts only while the
-  process's recorded creation time still matches, so a reused PID is
-  never killed. A supervised dashboard ended this way is restarted by its
-  supervisor.
+  process's recorded creation time still matches, and never on a process
+  without one, so a reused PID is not killed. On POSIX a small window
+  remains between that check and `SIGKILL`. A supervised dashboard ended
+  this way is restarted by its supervisor.
 - **Old code:** dashboards started from code older than Slice 13 create
   no restart event, so `ubersight-stop` cannot find them on Windows.
 
@@ -196,7 +215,7 @@ Linux, so neither platform's behavior depends on detection.
 
 | Signal | Windows source | Notes |
 | --- | --- | --- |
-| Default gateways | `route print -4 0.0.0.0` | Rows whose destination and netmask are both `0.0.0.0` give the gateway and interface address. |
+| Default gateways | `route print -4` | Rows whose destination and netmask are both `0.0.0.0` give the gateway and interface address. |
 | Gateway MAC | `arp -a <gateway> -N <interface>` | Dash-separated MACs are normalized to lower-case colon form. |
 | Local subnets | `route print -4` | On-link rows on interfaces that carry a default route. Host, loopback, link-local, and multicast routes are excluded, as is any interface without a default route, such as a VPN tunnel. |
 | WiFi SSID and BSSID | `netsh wlan show interfaces` | Reads the `SSID` and `BSSID` (or `AP BSSID`) lines. |
@@ -204,11 +223,24 @@ Linux, so neither platform's behavior depends on detection.
 All of these parse addresses and fixed column positions rather than
 translated labels, so they work in any Windows display language.
 
+Each observation runs each command once and reuses its output. On
+Windows, probes and other commands never run a program from the current
+directory (`NoDefaultCurrentDirectoryInExePath`). The dashboard runs from
+project checkouts, and a planted `route.exe` or `ip.exe` there would
+otherwise run on every probe.
+
 ### Limits
 
 - Windows 11 can withhold WLAN details from command-line tools unless
   location services are enabled for desktop apps. The WiFi name then reads
   `unknown`, while gateway-based recognition keeps working.
+- A failed probe does not refresh the network's observation time, so it
+  is retried, but at the network refresh interval (30 seconds by
+  default), not on every redraw. Each Windows observation costs about a
+  second.
+- In a Windows virtual machine without a WiFi adapter, the virtual
+  network counts as Ethernet. Unlike Linux (see Slice 20), Windows has no
+  check for paravirtual adapters yet.
 - Linux keeps its existing tools. Their broken `iwconfig` tier, which
   passed a string where a tuple was meant, is fixed.
 
@@ -223,11 +255,11 @@ non-ASCII WiFi names survive.
 When the WiFi probe affirmatively reports no WLAN connection and a default
 gateway has a MAC address, the observation is marked wired. The footer then
 replaces `WIFI: <ssid>` with `Ethernet (<label>)`, where the label is the
-location-memory record's Label, named with the `E` editor. Until the LAN is
-named, the footer shows `Ethernet (unknown LAN)`. LAN names live in
-location memory under `.local/` for now and move with the per-user state
-fix. A WLAN query withheld for
-location permission never counts as "no connection".
+location-memory record's LAN name (`lan_name`), set in the `E` editor's
+"LAN name" field. Until the LAN is named, the footer shows
+`Ethernet (unknown LAN)`. LAN names live in location memory under
+`.local/` for now and move with the per-user state fix. A WLAN query
+withheld for location permission never counts as "no connection".
 
 Slice 20 added the Linux wired mark. Linux has no WLAN service to ask, so
 the evidence comes from `/sys/class/net` instead. With no WiFi name and a
