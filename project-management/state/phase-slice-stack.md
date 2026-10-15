@@ -37,7 +37,7 @@ Active phase slices:
 * Slice 17: Add autosplit core, WT, and tmux, done.
 * Slice 18: Add autosplit GNU screen backend, done.
 * Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
-* Slice 21: Pre-merge review and trunk merge, active.
+* Slice 21: Pre-merge review and trunk merge, done.
 
 Phase 11 slices, all done:
 
@@ -51,10 +51,12 @@ Phase 11 slices, all done:
 
 ## Current Work
 
-Phase 12 runs on `feature/ubersight-autosplit`, which merges
-`feature/windows-platform-support` as Phase 11 slices land. The
-specification is `docs/specifications/ubersight-autosplit.md`, and the
-approved proposal records the operator's decisions.
+Phases 11 and 12 were merged to `trunk` on 2026-10-14, Phase 11 from
+`feature/windows-platform-support` and Phase 12 from
+`feature/ubersight-autosplit`. Phase 12 stays active until Slice 19's live
+checks are done. The specification is
+`docs/specifications/ubersight-autosplit.md`, and the approved proposal
+records the operator's decisions.
 
 Status:
 - All six autosplit backends are implemented with unit-tested plans.
@@ -66,6 +68,5 @@ Status:
   Terminator await the operator's workstation and are backlogged.
 - Phase 11 passed its Linux test run on 2026-10-14. Slice 20, the Linux
   `Ethernet (<LAN name>)` mark, was added afterwards.
-- The operator approved merging both branches to `trunk` after a
-  multi-angle review (Slice 21). The review's findings are fixed on both
-  branches; the merge comes next.
+- Slice 21: a multi-angle review found 39 verified issues, all fixed on
+  the branches before both merged to `trunk`.

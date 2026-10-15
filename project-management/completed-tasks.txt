@@ -4,6 +4,15 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T22:34:00-07:00 - Merged Phase 11 (native Windows support)
+  and Phase 12 (terminal workspace autosplit) into `trunk`, completing
+  Slice 21. Before the merge, the full suite and quality gate passed on
+  Windows 11 and on WSL2 Rocky 10.2 and Fedora 44. At the operator's
+  request, a LAN name the operator had entered, which an old test fixture
+  had used, was scrubbed from both feature branches' history, and both
+  branches were force-pushed. Owner: Claude and operator. Requestor:
+  operator.
+
 * 2026-10-14T21:55:00-07:00 - Fixed the autosplit findings of the
   pre-merge review:
   - tmux `#` formats in the project path no longer start panes in $HOME;
