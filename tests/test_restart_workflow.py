@@ -606,6 +606,9 @@ def test_supervised_dashboard_restarts_in_its_own_console(tmp_path: Path) -> Non
         second = wait_for_dashboard({first.pid})
         assert second.pid != first.pid
         assert supervisor.poll() is None
+        # Read the log before teardown: `taskkill /T` may end the dashboard
+        # a moment before the supervisor, which then logs a crash restart.
+        log = log_path.read_text(encoding="utf-8", errors="replace")
     finally:
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(supervisor.pid)],
@@ -617,7 +620,6 @@ def test_supervised_dashboard_restarts_in_its_own_console(tmp_path: Path) -> Non
         log_file.close()
 
     # The new dashboard must come from the restart path, not a crash restart.
-    log = log_path.read_text(encoding="utf-8", errors="replace")
     assert "restart requested" in log
     assert "exited with status" not in log
     assert "Traceback" not in log

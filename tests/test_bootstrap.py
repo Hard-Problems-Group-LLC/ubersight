@@ -697,6 +697,8 @@ def test_verify_curses_support_reports_rebuild_path(monkeypatch):
 
     module = load_install_stage_2_module()
     runtime_python = Path("/managed/python")
+    # The ncurses advice is the POSIX remedy; Windows has its own message.
+    monkeypatch.setattr(module, "is_windows", lambda: False)
 
     def fake_run(command, **_kwargs):
         """Simulate a pyenv build that omitted the `_curses` extension."""

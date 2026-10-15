@@ -303,8 +303,20 @@ Windows PowerShell 5.1 and PowerShell 7, and passes every argument to
 2. the pinned runtime via the `py` launcher;
 3. the newest Python 3 via the `py` launcher;
 4. `python` or `python3` on `PATH`, never the Microsoft Store aliases.
+   The aliases are dropped before the first match is taken, so a real
+   interpreter later on `PATH` still counts.
 
-The selected interpreter must run and report Python 3.9 or newer.
+The selected interpreter must run and report Python 3.9 or newer. Stage two
+runs through the same command that passed that check. The interpreter path
+is never read back from Python's output, because the code-page conversions
+on that pipe garble non-ASCII paths, such as a per-user Python under an
+accented or Cyrillic account name.
+
+Native commands never fail on stderr output alone; their exit codes decide.
+Under Windows PowerShell 5.1, the script-wide `Stop` preference would
+otherwise reject an interpreter that prints a warning, and would abort the
+install at the first pip or git notice whenever the installer's output is
+redirected.
 
 ### Stage two on Windows
 
@@ -315,6 +327,20 @@ The selected interpreter must run and report Python 3.9 or newer.
   the selected interpreter, which must meet the runtime floor. A version
   other than the pinned one is reported. pyenv, direnv, and shell-init
   setup are skipped, with a printed note.
+- **Venv-only mode** also installs `windows-curses` into `.venv`, because
+  it skips the package install that brings it in otherwise. The
+  requirement is read from `pyproject.toml` without `tomllib`, since stage
+  two runs on Python 3.9. A runtime without curses gets a Windows remedy,
+  not the ncurses advice.
+- **Rebuilding a venv in use.** When the selected interpreter changes, the
+  standard venv is rebuilt with `venv --clear`, and `dev_setup.py` does the
+  same to `.venv`. That clear deletes files in turn and fails at the first
+  one Windows refuses to delete, after `Lib` and `pyvenv.cfg` are already
+  gone. So stage two first checks whether any `Scripts\*.exe` in the venv is
+  running and stops, with nothing deleted, when one is. The message asks
+  the user to close the running dashboards (press Q in each pane) and rerun
+  the installer. A running executable can still be renamed on Windows, so
+  the check opens it for writing instead; that fails only while it runs.
 - `--system` is rejected on Windows.
 - Managed Git hook wrappers are converted to LF after installation, because
   the shared hook installer writes CRLF on Windows and bash rejects it.

@@ -20,6 +20,14 @@ and ISO 8601 timestamps.
   - **`ubersight-stop`:** POSIX matching ignores editors, linters, and
     one-shot runs; PID reuse mid-scan is detected; `--force` needs a
     recorded identity;
+  - **installer:** `install.ps1` no longer garbles non-ASCII interpreter
+    paths, skips a real Python behind the Store alias, or aborts under
+    Windows PowerShell 5.1 when a native command writes to stderr;
+    Windows venv-only mode installs `windows-curses`; a venv held open by
+    a running dashboard is never half-deleted; and the quality-gate cache
+    is keyed by platform and Python version;
+  - **tests:** a teardown race made the live Windows supervisor test fail
+    about one run in five;
   - **docs, fixtures, and records:** stale Windows docs, the `lan_name`
     label source, raw values in `last_observation`, fictional test
     fixtures, and missing docstrings.

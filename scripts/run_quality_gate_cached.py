@@ -306,13 +306,29 @@ def git_ignored_paths(repo_root: Path, candidates: Sequence[Path]) -> set[Path]:
     return ignored
 
 
+def execution_context() -> str:
+    """Return the platform and Python version that a cached result depends on.
+
+    Some tests run only on one platform or Python version, so a pass
+    recorded under one context proves nothing about another. A checkout
+    shared between Windows and WSL, for example, would otherwise let a Linux
+    pass skip the Windows-only tests.
+    """
+
+    major, minor = sys.version_info[:2]
+    return f"platform:{sys.platform}\npython:{major}.{minor}\n"
+
+
 def fingerprint_files(
     repo_root: Path,
     files: Iterable[Path],
     check_name: str,
 ) -> tuple[str, int]:
+    """Hash one check's in-scope files and execution context for the cache."""
+
     digest = hashlib.sha256()
     digest.update(f"schema:{SCHEMA_VERSION}\ncheck:{check_name}\n".encode("utf-8"))
+    digest.update(execution_context().encode("utf-8"))
     count = 0
     for file_path in files:
         rel = file_path.relative_to(repo_root).as_posix()

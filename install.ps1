@@ -17,10 +17,19 @@
 # Each candidate must run and report Python 3.9 or newer. Stage two enforces
 # the stricter runtime floor where it applies.
 #
+# Stage two runs through the same command that passed the version probe. The
+# interpreter path is never read back from Python's output: piped output goes
+# through code-page conversions that garble non-ASCII paths, such as a
+# per-user Python under C:\Users\<name> for a name with accented letters.
+#
 # On a machine whose execution policy blocks local scripts, run:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 $ErrorActionPreference = 'Stop'
+# Native commands report failure through $LASTEXITCODE, which this script
+# checks itself. PowerShell 7.3+ can also turn a nonzero exit code into an
+# error when this preference is enabled, so it is switched off here.
+$PSNativeCommandUseErrorActionPreference = $false
 Set-StrictMode -Version 3.0
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -39,24 +48,36 @@ function Get-PinnedRuntimeVersion {
     return $null
 }
 
-function Resolve-Interpreter {
-    # Return the absolute interpreter path when the command runs Python 3.9+.
+function Get-CommandPrefix {
+    # Return the arguments that follow the executable in a candidate command.
     param([string[]]$Command)
+    if ($Command.Length -gt 1) { return $Command[1..($Command.Length - 1)] }
+    return @()
+}
+
+function Test-Interpreter {
+    # Return whether the candidate command runs Python 3.9 or newer.
+    #
+    # Only the ASCII result of the version check crosses stdout.
+    param([string[]]$Command)
+    # Windows PowerShell 5.1 turns native stderr into error records, and the
+    # script-wide 'Stop' would make the first one fatal. A working
+    # interpreter that prints a warning to stderr, for example about a
+    # broken .pth file, would then be rejected. $LASTEXITCODE decides
+    # instead. This assignment is local to the function.
+    $ErrorActionPreference = 'Continue'
     $executable = $Command[0]
-    $prefix = @()
-    if ($Command.Length -gt 1) { $prefix = $Command[1..($Command.Length - 1)] }
-    $probe = 'import sys; print(sys.executable); print(sys.version_info >= (3, 9))'
+    $prefix = @(Get-CommandPrefix -Command $Command)
+    $probe = 'import sys; print(sys.version_info >= (3, 9))'
     try {
         $output = & $executable @prefix -c $probe 2>$null
     } catch {
-        return $null
+        # The executable is missing or cannot be started.
+        return $false
     }
-    if ($LASTEXITCODE -ne 0 -or -not $output) { return $null }
-    $lines = @($output)
-    if ($lines.Length -ge 2 -and $lines[1].Trim() -eq 'True') {
-        return $lines[0].Trim()
-    }
-    return $null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $lines = @($output | ForEach-Object { ([string]$_).Trim() })
+    return ($lines.Length -gt 0 -and $lines[$lines.Length - 1] -eq 'True')
 }
 
 $candidates = New-Object System.Collections.Generic.List[object]
@@ -70,29 +91,41 @@ if ($launcher) {
     $candidates.Add(@($launcher.Source, '-3'))
 }
 foreach ($name in @('python', 'python3')) {
+    # Get-Command lists every match in PATH order. The WindowsApps entries
+    # are Store aliases that open the Store instead of running Python when
+    # no interpreter is installed, so they are dropped before the first
+    # match is taken; a real interpreter later on PATH still counts.
     $command = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -notlike '*\WindowsApps\*' } |
         Select-Object -First 1
-    # The WindowsApps entries are Store aliases that open the Store instead
-    # of running Python when no interpreter is installed.
-    if ($command -and $command.Source -notlike '*\WindowsApps\*') {
+    if ($command) {
         $candidates.Add(@($command.Source))
     }
 }
 
-$python = $null
+$selected = $null
 foreach ($candidate in $candidates) {
-    $python = Resolve-Interpreter -Command $candidate
-    if ($python) { break }
+    if (Test-Interpreter -Command $candidate) {
+        $selected = $candidate
+        break
+    }
 }
-if (-not $python) {
+if (-not $selected) {
     Write-Host '[install] FAIL: no Python 3.9+ interpreter was found.'
     Write-Host '[install] Install Python 3.12 or newer, for example with'
     Write-Host '[install]   winget install Python.Python.3.12'
     Write-Host '[install] then rerun .\install.ps1.'
     exit 1
 }
-Write-Host "[install] Python: $python"
+Write-Host "[install] Python: $($selected -join ' ')"
 
 $env:THEKNOWLEDGE_MANAGED_INSTALL_STAGE1 = '1'
-& $python $stageTwo @args
+$executable = $selected[0]
+$prefix = @(Get-CommandPrefix -Command $selected)
+# Stage two and its children, such as git and pip, write progress and
+# notices to stderr. Under 'Stop', Windows PowerShell 5.1 would abort on the
+# first such line whenever the installer's output is redirected, for example
+# with *> install.log or 2>&1 | Tee-Object. The exit code decides instead.
+$ErrorActionPreference = 'Continue'
+& $executable @prefix $stageTwo @args
 exit $LASTEXITCODE

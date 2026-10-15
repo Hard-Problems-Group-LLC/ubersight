@@ -13,7 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.request import urlopen
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -67,6 +67,13 @@ CURSES_BUILD_PROBE_SOURCE = "#include <curses.h>\nint main(void) { return 0; }\n
 PYTHON_RUNTIME_PROBE = (
     "import sys; " "print('.'.join(str(part) for part in sys.version_info[:3]))"
 )
+WINDOWS_CURSES_DISTRIBUTION = "windows-curses"
+# Matches the start of `dependencies = [` on its own line in `[project]`.
+PROJECT_DEPENDENCIES_START = re.compile(r"(?m)^dependencies\s*=\s*\[")
+# One token inside a TOML array of strings: a basic string, a literal
+# string, a comment, or the closing bracket. Strings are matched before
+# comments, so a `#` or `]` inside a requirement string is never misread.
+TOML_ARRAY_TOKEN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'([^\'\n]*)\'|#[^\n]*|(\])')
 
 
 class CursesSupportError(RuntimeError):
@@ -75,6 +82,10 @@ class CursesSupportError(RuntimeError):
 
 class PythonRuntimeError(RuntimeError):
     """Report that a selected Python executable is missing or unusable."""
+
+
+class VenvInUseError(RuntimeError):
+    """Report that running programs hold a virtual environment open."""
 
 
 def broken_pyenv_rebuild_required(
@@ -337,6 +348,11 @@ def rebuild_runtime_context(
 def ensure_repo_venv(runtime_python: Path) -> Path:
     """Create or refresh `.venv` using the configured runtime interpreter."""
 
+    venv_path = REPO_ROOT / ".venv"
+    # dev_setup.py is managed upstream and clears `.venv` without checking
+    # whether it is in use, so the Windows check runs here first.
+    if is_windows() and repo_venv_rebuild_pending(venv_path, runtime_python):
+        ensure_venv_not_in_use(venv_path)
     run(
         [
             str(runtime_python),
@@ -346,7 +362,88 @@ def ensure_repo_venv(runtime_python: Path) -> Path:
         ],
         cwd=REPO_ROOT,
     )
-    return venv_python_path(REPO_ROOT / ".venv")
+    return venv_python_path(venv_path)
+
+
+def python_version_report(python_executable: Path) -> Optional[str]:
+    """Return the `--version` text an interpreter prints, or None on failure."""
+
+    try:
+        completed = run(
+            [str(python_executable), "--version"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    report = (completed.stdout or completed.stderr or "").strip()
+    return report or None
+
+
+def repo_venv_rebuild_pending(venv_path: Path, runtime_python: Path) -> bool:
+    """Return whether `dev_setup.py` will clear and rebuild `venv_path`.
+
+    This mirrors `ensure_virtualenv` in `dev_setup.py`: an existing
+    environment is cleared when its interpreter reports a different version
+    than the selected runtime. When either version probe fails, dev_setup.py
+    fails the same probe before it deletes anything, so no rebuild is
+    pending.
+    """
+
+    venv_python = venv_python_path(venv_path)
+    if not venv_python.exists():
+        return False
+    current = python_version_report(venv_python)
+    selected = python_version_report(runtime_python)
+    if current is None or selected is None:
+        return False
+    return current != selected
+
+
+def file_in_use(path: Path) -> bool:
+    """Return whether Windows refuses write access to `path` because it runs.
+
+    Windows lets a running executable be renamed, but not deleted or opened
+    for writing. Opening it for writing, without writing anything, detects a
+    running interpreter while leaving the file untouched.
+    """
+
+    try:
+        with open(path, "r+b"):
+            pass
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        return True
+    return False
+
+
+def ensure_venv_not_in_use(venv_path: Path) -> None:
+    """Stop before a Windows venv rebuild would delete files that are in use.
+
+    `venv --clear` deletes the environment's files in turn and fails at the
+    first one Windows refuses to delete. A running dashboard keeps
+    `Scripts\\python.exe` busy, so the clear would already have removed
+    `Lib` and `pyvenv.cfg`, leaving a gutted environment that every launcher
+    still points at. Checking the executables first stops the install while
+    nothing has been deleted. POSIX hosts can delete files that are in use,
+    so they are not checked.
+    """
+
+    if not is_windows():
+        return
+    busy = [
+        path
+        for path in sorted((venv_path / "Scripts").glob("*.exe"))
+        if file_in_use(path)
+    ]
+    if busy:
+        raise VenvInUseError(
+            "Cannot rebuild {} for the selected Python: {} is in use by a "
+            "running program, most likely an Ubersight dashboard. Nothing was "
+            "changed. Close the running Ubersight dashboards (press Q in each "
+            "pane), then rerun the installer.".format(venv_path, busy[0].name)
+        )
 
 
 def windows_repo_runtime_python() -> Path:
@@ -420,6 +517,7 @@ def ensure_virtualenv(base_python: Path, venv_path: Path) -> Path:
                 return venv_python
         except (OSError, RuntimeError, subprocess.CalledProcessError):
             pass
+        ensure_venv_not_in_use(venv_path)
         run(
             [str(base_python), "-m", "venv", "--clear", str(venv_path)],
             cwd=REPO_ROOT,
@@ -531,6 +629,75 @@ def has_dev_extra(repo_root: Path) -> bool:
     if not text:
         return False
     return bool(re.search(r"(?m)^dev\s*=\s*\[", text))
+
+
+def project_dependencies(repo_root: Path) -> List[str]:
+    """Return the `[project]` dependency strings from `pyproject.toml`.
+
+    Stage two must run on Python 3.9, which has no `tomllib`, so this scans
+    only the one array it needs: the `dependencies` key of the `[project]`
+    table, written as an array of strings.
+    """
+
+    text = _pyproject_text(repo_root)
+    table = re.search(r"(?ms)^\[project\][ \t]*$(.*?)(?=^\[|\Z)", text)
+    if table is None:
+        return []
+    body = table.group(1)
+    start = PROJECT_DEPENDENCIES_START.search(body)
+    if start is None:
+        return []
+    dependencies = []
+    for token in TOML_ARRAY_TOKEN.finditer(body, start.end()):
+        if token.group(3):
+            break
+        value = token.group(1) if token.group(1) is not None else token.group(2)
+        if value is not None:
+            dependencies.append(value)
+    return dependencies
+
+
+def windows_curses_requirement(repo_root: Path) -> str:
+    """Return the `windows-curses` requirement that `pyproject.toml` declares.
+
+    Reading it keeps the version floor in one place. The environment marker
+    is dropped because the caller installs it only on Windows.
+    """
+
+    for requirement in project_dependencies(repo_root):
+        name = re.match(r"[A-Za-z0-9._-]+", requirement)
+        if name and re.sub(r"[-_.]+", "-", name.group(0)).lower() == (
+            WINDOWS_CURSES_DISTRIBUTION
+        ):
+            return requirement.split(";", 1)[0].strip()
+    raise RuntimeError(
+        "pyproject.toml does not declare the {} dependency that Ubersight "
+        "needs on Windows.".format(WINDOWS_CURSES_DISTRIBUTION)
+    )
+
+
+def ensure_windows_venv_only_curses(venv_python: Path, mode: str) -> bool:
+    """Install `windows-curses` into a Windows venv-only `.venv`.
+
+    Venv-only mode builds `.venv` from the development tool requirements and
+    skips the package install, so nothing else brings in the curses runtime
+    that the dashboard and the tests need when they run from source. Return
+    whether the install ran.
+    """
+
+    if mode != "venv-only" or not is_windows():
+        return False
+    run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            windows_curses_requirement(REPO_ROOT),
+        ],
+        cwd=REPO_ROOT,
+    )
+    return True
 
 
 def launcher_dir_for_scope(scope: str, user_home: Optional[Path] = None) -> Path:
@@ -936,6 +1103,18 @@ def verify_curses_support(python_executable: Path) -> None:
     except subprocess.CalledProcessError as error:
         details = _compact_failure_detail(error.stdout or "", error.stderr or "")
         detail_suffix = ": {}".format(details) if details else ""
+        if is_windows():
+            # Windows CPython ships without `_curses`; the windows-curses
+            # wheel supplies it, and no native build step is involved.
+            raise CursesSupportError(
+                "Selected Python runtime cannot import curses{}; on Windows, "
+                "Ubersight needs the windows-curses package in that "
+                "environment. Rerun .\\install.ps1, which installs it in "
+                "every mode, or install it directly with: "
+                '"{}" -m pip install {}'.format(
+                    detail_suffix, python_executable, WINDOWS_CURSES_DISTRIBUTION
+                )
+            ) from error
         raise CursesSupportError(
             "Selected Python runtime cannot import curses{}; Ubersight needs "
             "native terminal support. Run ./scripts/install_prerequisites.sh "
@@ -1030,6 +1209,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     )
                 )
             venv_python = ensure_repo_venv(runtime_python)
+            ensure_windows_venv_only_curses(venv_python, args.mode)
             install_venv = REPO_ROOT / ".venv"
             install_project(
                 venv_python,
