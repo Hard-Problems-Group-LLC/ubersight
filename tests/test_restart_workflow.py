@@ -287,6 +287,16 @@ def test_main_reports_and_exits_nonzero_when_dashboards_remain(
     assert "matched 2 Ubersight dashboard(s); 1 still running." in output
 
 
+def test_main_dry_run_reports_that_nothing_was_signaled(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(stop_ubersight, "find_dashboards", fake_processes)
+
+    assert stop_ubersight.main(["--dry-run"]) == 0
+    output = capsys.readouterr().out
+    assert "would restart: 11 python.exe" in output
+    assert "matched 2 Ubersight dashboard(s); dry run, nothing signaled." in output
+    assert "still running" not in output
+
+
 def test_windows_discovery_uses_restart_events(monkeypatch) -> None:
     entries = (
         windows_processes.ProcessEntry(os.getpid(), 1, "python.exe"),

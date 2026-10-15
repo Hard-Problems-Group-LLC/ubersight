@@ -339,7 +339,13 @@ def test_windows_repo_runtime_uses_the_selected_interpreter(capsys) -> None:
     ("value", "directory", "present"),
     [
         ("C:\\Tools;C:\\Users\\op\\.local\\bin", "C:\\Users\\op\\.local\\bin", True),
-        ("C:\\Tools;C:\\Users\\op\\.local\\bin\\", "C:\\Users\\op\\.local\\bin", True),
+        # A trailing backslash is a separator only under Windows path rules.
+        pytest.param(
+            "C:\\Tools;C:\\Users\\op\\.local\\bin\\",
+            "C:\\Users\\op\\.local\\bin",
+            True,
+            marks=windows_only,
+        ),
         ('C:\\Tools;"C:\\Users\\op\\.local\\bin"', "C:\\Users\\op\\.local\\bin", True),
         ("C:\\Tools;;", "C:\\Users\\op\\.local\\bin", False),
         ("", "C:\\Users\\op\\.local\\bin", False),
@@ -349,6 +355,16 @@ def test_path_value_contains(value: str, directory: str, present: bool) -> None:
     stage = load_stage_two()
 
     assert stage.path_value_contains(value, Path(directory), ";") is present
+
+
+def test_path_value_contains_ignores_a_trailing_separator() -> None:
+    """Trailing separators never hide an entry, under this platform's rules."""
+
+    stage = load_stage_two()
+    directory = Path.home() / ".local" / "bin"
+    value = os.pathsep.join(["tools", str(directory) + os.sep])
+
+    assert stage.path_value_contains(value, directory)
 
 
 @windows_only

@@ -4,6 +4,14 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T19:16:00-07:00 - Verified Phase 11 (native Windows support) on
+  Linux: WSL2 Rocky 10.2 and Fedora 44, fresh clones, a Linux-only `PATH`.
+  Both install modes, the full suite, the quality gate, and live
+  `ubersight-stop` restarts passed after three fixes: `gawk` added to the
+  dnf/yum prerequisites, a Windows-only PATH test case marked as such, and
+  an accurate `ubersight-stop --dry-run` summary. Owner: Claude and
+  operator.
+
 * 2026-08-03T15:05:24-07:00 - Repaired and hardened shared-pyenv corruption
   recovery. Added explicit integrity detection, guarded transactional rebuilds,
   rollback coverage, physical-interpreter fallback, and shell-neutral installer

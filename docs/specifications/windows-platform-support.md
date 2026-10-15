@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: Implemented (Slices 11 through 16); Linux test run pending  
+Status: Implemented (Slices 11 through 16); verified on Linux 2026-10-14  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -167,7 +167,8 @@ including Q.
   `--wait-seconds` (default 5) for each matched dashboard to exit. It exits
   with status 0 when every dashboard exited, and status 1 when some are
   still running.
-- **`--dry-run`:** lists matches only.
+- **`--dry-run`:** lists matches only, and its summary says nothing was
+  signaled.
 - **`--force`:** after the wait, ends remaining dashboards:
   `TerminateProcess` on Windows, `SIGKILL` on POSIX. It acts only while the
   process's recorded creation time still matches, so a reused PID is
@@ -316,6 +317,29 @@ so permanently:
 Tests of behavior that does run on Windows use platform-correct fixtures
 instead of POSIX path literals. Those cover the development command log,
 the standard install virtual environment, and Git hook installation.
+
+## Linux Verification
+
+On 2026-10-14 the branch was checked on Rocky Linux 10.2 and Fedora 44,
+both running under WSL2, from a fresh clone and with a Linux-only `PATH`:
+
+- `scripts/install_prerequisites.sh`, then `./install.sh` in standard and
+  development modes. Development mode built pyenv Python 3.14.6 with curses
+  on both. On Rocky it also fetched direnv, which Rocky 10 does not
+  package.
+- The full test suite and the uncached quality gate.
+- Live `ubersight-stop` restarts of dashboards under `--supervise`.
+
+The run found three problems, all fixed:
+
+- Minimal Fedora images, such as the WSL image, have no `awk`, which
+  pyenv's Python build needs. `install_prerequisites.sh` now installs
+  `gawk` with dnf or yum.
+- A PATH test asserted Windows path rules on every platform. Its
+  trailing-backslash case is now Windows-only, and a platform-neutral test
+  covers trailing separators everywhere.
+- `ubersight-stop --dry-run` reported "0 still running" although it
+  signals nothing. It now says nothing was signaled.
 
 ## Follow-Ups Outside This Repository
 
