@@ -1,6 +1,6 @@
 # Ubersight Autosplit
 
-Status: Implemented; live verification pending on Linux backends  
+Status: Implemented; verified live except WezTerm, kitty, and Terminator  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/ubersight-autosplit.md`
@@ -197,6 +197,38 @@ Known limitations:
 - A missing tool is reported before anything runs.
 - Version probes that fail fall back to assuming a current release, with a
   printed note.
+
+## Live Verification
+
+| Backend | Where | Result |
+| --- | --- | --- |
+| Windows Terminal | Operator workstation, 2026-10-13 | Verified by the operator. |
+| tmux 3.7c, and a 3.3a snapshot | WSL2 Fedora 44 and Rocky 10.2, 2026-10-14 | Verified. |
+| GNU screen 5.0.1, inside tmux | WSL2 Fedora 44 and Rocky 10.2, 2026-10-14 | Verified; detection chose screen over the enclosing tmux. |
+| tmux and screen over SSH, tmux over mosh | WSL2 Fedora 44, loopback sshd, 2026-10-14 | Verified. |
+| Plain SSH or mosh shell | WSL2 Fedora 44, 2026-10-14 | Refused with a message naming the transport, even with leaked emulator markers. |
+| WezTerm, kitty, Terminator | Not yet | Pending. |
+
+Details:
+
+- In a 200 by 50 terminal, tmux gave the invoking pane 139 by 33, the
+  console 139 by 16, and the dashboard 60 by 50, with focus left on the
+  invoking pane. Over SSH and mosh, the remote tmux matched within its
+  smaller window.
+- `ubersight-stop` restarted each dashboard in place under its
+  supervisor, and Q closed the dashboard pane.
+- Arguments after `--` reached the dashboard.
+- Outside a multiplexer, the `WT_SESSION` that Windows Terminal forwards
+  into WSL is ignored, as specified.
+
+Environment notes, not Ubersight defects:
+
+- Rocky 10's tmux package, a 3.3a git snapshot that reports `next-3.4`,
+  aborts its server on `capture-pane`. Autosplit never uses that command;
+  it only matters to scripts that inspect panes.
+- On the Rocky bench, screen installed without its setgid bit, because
+  its group was created after the binary was installed. screen then
+  refused to start until `sudo dnf reinstall screen` restored the bit.
 
 ## Acceptance Criteria
 

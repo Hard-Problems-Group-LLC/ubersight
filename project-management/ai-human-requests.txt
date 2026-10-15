@@ -20,6 +20,11 @@ Pending Requests
   Use `--dry-run` first to see each plan. Specification:
   `docs/specifications/ubersight-autosplit.md`. Requestor: Claude.
   Owner: operator.
+  2026-10-14T19:18:00-07:00 - On the operator's WSL2 bench, Claude
+  verified tmux and GNU screen locally and over SSH, tmux over mosh, and
+  the refusal of plain SSH and mosh shells. See the specification's Live
+  Verification section. WezTerm, kitty, and Terminator remain, as does
+  screen over mosh.
 
 Active Requests
 ---------------

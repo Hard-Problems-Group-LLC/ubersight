@@ -42,6 +42,6 @@ WiFi names, Tailnet names, or other sensitive runtime state here.
 * Slice 14: Add Windows network probes, done.
 * Slice 15: Add Windows install path, done.
 * Slice 16: Reach Windows test parity, done.
-* Slice 17: Add autosplit core, WT, and tmux, active.
-* Slice 18: Add autosplit GNU screen backend, implemented; awaiting Linux verification.
-* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting Linux verification.
+* Slice 17: Add autosplit core, WT, and tmux, done.
+* Slice 18: Add autosplit GNU screen backend, done.
+* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.

@@ -34,9 +34,9 @@ Upcoming phases:
 
 Active phase slices:
 
-* Slice 17: Add autosplit core, WT, and tmux, active.
-* Slice 18: Add autosplit GNU screen backend, implemented; awaiting Linux verification.
-* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting Linux verification.
+* Slice 17: Add autosplit core, WT, and tmux, done.
+* Slice 18: Add autosplit GNU screen backend, done.
+* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
 
 Phase 11 slices, all done:
 
@@ -57,6 +57,8 @@ Status:
 - Windows Terminal was verified live by the operator.
 - The dashboard pane runs under `ubersight --supervise`, so
   `ubersight-stop` restarts it in place.
-- The Linux backends still await live operator verification.
-- Phase 11 is complete, pending the operator's Linux test run and the
-  merge to `trunk`.
+- tmux and GNU screen were verified live on the WSL2 Rocky and Fedora
+  bench, locally and over SSH, and tmux over mosh. WezTerm, kitty, and
+  Terminator still await live verification.
+- Phase 11 passed its Linux test run on 2026-10-14 and awaits the merge
+  to `trunk`.
