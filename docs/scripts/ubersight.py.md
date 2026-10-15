@@ -602,7 +602,7 @@ contacting network providers.
 ## Windows
 
 Ubersight runs natively on Windows 11 in Windows Terminal or the classic
-console host. Windows support was delivered in roadmap Phase 11. See
+console host. Windows support was delivered in roadmap Phase 11000. See
 `docs/specifications/windows-platform-support.md` for the details.
 
 ### Terminal library

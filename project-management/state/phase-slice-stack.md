@@ -14,59 +14,36 @@ WiFi names, Tailnet names, or other sensitive runtime state here. Live status
 for the side-window dashboard belongs under `.local/ubersight/` and must stay
 untracked.
 
+Numbering follows `project-management/development-roadmap.md`: phases in
+thousands, and slices in thousands restarting at 1000 in each phase.
+
 ## Current Stack
 
-Recent phases:
+Recently finished phases:
 
-* Phase 10: Execution-layer failure forensics, done.
-* Phase 11: Native Windows support, done.
+* Phase 12000: Terminal workspace autosplit, done.
+* Phase 4000: Roadmap-backed status workflow, done again after its
+  Slice 2000 (numbering in thousands).
 
-Active phase:
-
-* Phase 12: Terminal workspace autosplit, active.
+Active phase: none. No work is in progress.
 
 Upcoming phases:
 
-* Phase 5: Consuming-project onboarding contracts, planned.
-* Phase 6: Background-job producer integration, planned.
-* Phase 7: Status-schema hardening and validation, planned.
-* Phase 8: Dashboard usability refinement, planned.
-
-Active phase slices:
-
-* Slice 17: Add autosplit core, WT, and tmux, done.
-* Slice 18: Add autosplit GNU screen backend, done.
-* Slice 19: Add WezTerm, kitty, Terminator, implemented; awaiting live verification.
-* Slice 21: Pre-merge review and trunk merge, done.
-
-Phase 11 slices, all done:
-
-* Slice 11: Fix Windows runtime blockers, done.
-* Slice 12: Add Windows process identity, done.
-* Slice 13: Port stop and restart workflow, done.
-* Slice 14: Add Windows network probes, done.
-* Slice 15: Add Windows install path, done.
-* Slice 16: Reach Windows test parity, done.
-* Slice 20: Add Linux wired-network mark, done.
+* Phase 13000: Live terminal verification, planned; waits for the
+  operator's Linux workstation.
+* Phase 5000: Consuming-project onboarding contracts, planned.
+* Phase 6000: Background-job producer integration, planned.
+* Phase 7000: Status-schema hardening and validation, planned.
+* Phase 8000: Dashboard usability refinement, planned.
 
 ## Current Work
 
-Phases 11 and 12 were merged to `trunk` on 2026-10-14, Phase 11 from
-`feature/windows-platform-support` and Phase 12 from
-`feature/ubersight-autosplit`. Phase 12 stays active until Slice 19's live
-checks are done. The specification is
-`docs/specifications/ubersight-autosplit.md`, and the approved proposal
-records the operator's decisions.
+Phase 4000 Slice 2000 renumbered the roadmap: phases in thousands, and
+slices in thousands restarting at 1000 in each phase, with slices nested
+under their phases. The roadmap keeps a table from the old flat numbers,
+which older records and commit messages still use.
 
-Status:
-- All six autosplit backends are implemented with unit-tested plans.
-- Windows Terminal was verified live by the operator.
-- The dashboard pane runs under `ubersight --supervise`, so
-  `ubersight-stop` restarts it in place.
-- tmux and GNU screen were verified live on the WSL2 Rocky and Fedora
-  bench, locally and over SSH, and tmux over mosh. WezTerm, kitty, and
-  Terminator await the operator's workstation and are backlogged.
-- Phase 11 passed its Linux test run on 2026-10-14. Slice 20, the Linux
-  `Ethernet (<LAN name>)` mark, was added afterwards.
-- Slice 21: a multi-angle review found 39 verified issues, all fixed on
-  the branches before both merged to `trunk`.
+Phases 11000 and 12000 were merged to `trunk` on 2026-10-14. Phase 12000's
+remaining work, live checks of the WezTerm, kitty, and Terminator
+backends and of GNU screen over mosh, moved to Phase 13000 because it
+waits for operator time.

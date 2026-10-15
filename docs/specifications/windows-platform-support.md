@@ -1,6 +1,6 @@
 # Windows Platform Support
 
-Status: Implemented (Slices 11 through 16, and 20); verified on Linux 2026-10-14  
+Status: Implemented (Phase 11000, Slices 1000 through 7000); verified on Linux 2026-10-14  
 Date: 2026-10-13  
 Owner: Claude and operator  
 Proposal: `project-management/proposals/approved/windows-platform-support.md`
@@ -15,7 +15,7 @@ same unless this specification says otherwise.
 Ubersight treats `os.name == "nt"` as native Windows. WSL, Cygwin, and MSYS
 Python builds report POSIX and keep the POSIX behavior.
 
-## Slice 11: Runtime Blockers
+## Slice 1000: Runtime Blockers
 
 ### Terminal Library
 
@@ -79,7 +79,7 @@ Python builds report POSIX and keep the POSIX behavior.
 `--once` must not crash when a rendered line contains characters the
 output encoding cannot represent. Such characters are replaced.
 
-## Slice 12: Process Identity and Process Trees
+## Slice 2000: Process Identity and Process Trees
 
 ### Background-Job Liveness
 
@@ -117,7 +117,7 @@ If `ctypes` inspection proves fragile or too limited, for example when
 full command lines are needed, the approved fallback is to add
 `psutil; sys_platform == "win32"` behind the same internal interface.
 
-## Slice 13: Stop and Restart
+## Slice 3000: Stop and Restart
 
 ### Restart requests
 
@@ -193,15 +193,15 @@ Details:
   without one, so a reused PID is not killed. On POSIX a small window
   remains between that check and `SIGKILL`. A supervised dashboard ended
   this way is restarted by its supervisor.
-- **Old code:** dashboards started from code older than Slice 13 create
+- **Old code:** dashboards started from code older than Slice 3000 create
   no restart event, so `ubersight-stop` cannot find them on Windows.
 
 ### Autosplit
 
-Once Phase 12 merges this slice, `ubersight-autosplit` starts its dashboard
+Once Phase 12000 merges this slice, `ubersight-autosplit` starts its dashboard
 pane with `--supervise`.
 
-## Slice 14: Network and Location Probes
+## Slice 4000: Network and Location Probes
 
 On Ethernet, the router's identity stands in for an SSID: the default
 gateway's MAC address. Location memory already matches on it, so a wired
@@ -239,7 +239,7 @@ otherwise run on every probe.
   default), not on every redraw. Each Windows observation costs about a
   second.
 - In a Windows virtual machine without a WiFi adapter, the virtual
-  network counts as Ethernet. Unlike Linux (see Slice 20), Windows has no
+  network counts as Ethernet. Unlike Linux (see Slice 7000), Windows has no
   check for paravirtual adapters yet.
 - Linux keeps its existing tools. Their broken `iwconfig` tier, which
   passed a string where a tuple was meant, is fixed.
@@ -261,7 +261,7 @@ location-memory record's LAN name (`lan_name`), set in the `E` editor's
 `.local/` for now and move with the per-user state fix. A WLAN query
 withheld for location permission never counts as "no connection".
 
-Slice 20 added the Linux wired mark. Linux has no WLAN service to ask, so
+Slice 7000 added the Linux wired mark. Linux has no WLAN service to ask, so
 the evidence comes from `/sys/class/net` instead. With no WiFi name and a
 router MAC, the observation is wired when every interface carrying a
 default route is wired:
@@ -283,7 +283,7 @@ looks like hardware and is marked wired.
 When every WiFi probe fails, the dashboard normally reuses the cached
 WiFi name, because a failed probe is no evidence of a move. A wired
 observation is the exception on both platforms: the cable explains the
-missing name. Before Slice 20, moving from WiFi to a cable kept showing
+missing name. Before Slice 7000, moving from WiFi to a cable kept showing
 the old WiFi name and never showed `Ethernet`.
 
 ### Per-user state
@@ -291,7 +291,7 @@ the old WiFi name and never showed `Ethernet`.
 Location state is still per project. Moving it to a per-user store is
 tracked as `project-management/bugs/open/per-user-operator-location-state.md`.
 
-## Slice 15: Install Path
+## Slice 5000: Install Path
 
 ### Stage one
 
@@ -381,7 +381,7 @@ also redirects `USERPROFILE`, `APPDATA`, and `LOCALAPPDATA` on Windows. The
 installer refuses such a home unless `--user-home` or
 `--allow-isolated-home` is given.
 
-## Slice 16: Test Parity
+## Slice 6000: Test Parity
 
 The whole suite runs on Windows. An installer test is skipped there only
 when the behavior it covers never runs on Windows, and its skip reason says
@@ -440,5 +440,5 @@ pending FieldManual migration.
   - Background-job files written by live processes stay visible, and files
     from exited processes are removed.
   - `--process-root` shows the subtree of a live process.
-- The dashboard tests that were failing on Windows before Slice 11 pass.
+- The dashboard tests that were failing on Windows before Slice 1000 pass.
 - The Linux test suite still passes.

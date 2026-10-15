@@ -4,6 +4,24 @@ Record completed tasks with newest entries at the top. Use asterisk-plus-blank
 line formatting. Include concise outcomes, owners, blocker resolution notes,
 and ISO 8601 timestamps.
 
+* 2026-10-14T23:06:00-07:00 - Renumbered the roadmap (Phase 4000 Slice
+  2000, at the operator's direction):
+  - phases are numbered in thousands;
+  - slices are numbered in thousands, starting again at 1000 in each phase;
+  - slices are nested under their phases.
+  The roadmap keeps a table from the old flat numbers. AGENTS.md gained
+  the numbering rule and a deferral rule: work that waits for operator
+  time moves to a later or new slice or phase, and the roadmap and
+  Ubersight status are updated together. Under that rule, the planned
+  roadmap parsing helper moved from the finished Phase 4000 to Phase 7000.
+  Owner: Claude. Requestor: operator.
+
+* 2026-10-14T23:06:00-07:00 - Closed Phase 12000 (terminal workspace
+  autosplit): Slices 1000 to 4000 are done and merged to `trunk`. The live
+  checks of the WezTerm, kitty, and Terminator backends and of GNU screen
+  over mosh wait for the operator's workstation, so they moved to the new
+  Phase 13000. Owner: Claude and operator. Requestor: operator.
+
 * 2026-10-14T22:34:00-07:00 - Merged Phase 11 (native Windows support)
   and Phase 12 (terminal workspace autosplit) into `trunk`, completing
   Slice 21. Before the merge, the full suite and quality gate passed on

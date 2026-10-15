@@ -246,8 +246,8 @@ Known limitations:
 | GNU screen 5.0.1, inside tmux | WSL2 Fedora 44 and Rocky 10.2, 2026-10-14 | Verified; detection chose screen over the enclosing tmux. |
 | tmux and screen over SSH, tmux over mosh | WSL2 Fedora 44, loopback sshd, 2026-10-14 | Verified. |
 | Plain SSH or mosh shell | WSL2 Fedora 44, 2026-10-14 | Refused with a message naming the transport, even with leaked emulator markers. |
-| WezTerm, kitty, Terminator | Not yet | Pending. |
-| GNU screen over mosh | Not yet | Pending. |
+| WezTerm, kitty, Terminator | Not yet | Pending: roadmap Phase 13000, Slice 1000. |
+| GNU screen over mosh | Not yet | Pending: roadmap Phase 13000, Slice 2000. |
 
 Details:
 

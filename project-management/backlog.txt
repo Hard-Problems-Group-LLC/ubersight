@@ -13,19 +13,19 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
   scripts LF (`*.sh text eol=lf`) in Windows checkouts. With Git for
   Windows' default `core.autocrlf=true`, `install.sh` and the other
   scripts check out as CRLF and fail with `\r` errors when the same
-  checkout is used from WSL or Git Bash. Found by the Phase 11/12
+  checkout is used from WSL or Git Bash. Found by the Phase 11000/12000
   pre-merge review. Owner: Claude. Requestor: Claude. No active blocker.
 
 * 2026-10-14T21:50:00-07:00 - Give every test function a docstring. The
   project rule documents every callable, but most test functions on
-  `trunk` and in several Phase 11 test files describe themselves only by
+  `trunk` and in several Phase 11000 test files describe themselves only by
   name; the installer and autosplit tests now follow the rule. Owner:
   Claude. Requestor: Claude. No active blocker.
 
 * 2026-10-14T20:45:00-07:00 - Verify the WezTerm, kitty, and Terminator
-  autosplit backends live (roadmap Slice 19), plus GNU screen over mosh.
-  The WSL2 bench verified tmux and screen but cannot run these graphical
-  terminals well. The checks are listed in the pending request in
+  autosplit backends live, plus GNU screen over mosh (roadmap Phase
+  13000). The WSL2 bench verified tmux and screen but cannot run these
+  graphical terminals well. The checks are listed in the pending request in
   `project-management/ai-human-requests.txt`; record results in the Live
   Verification section of `docs/specifications/ubersight-autosplit.md`.
   Owner: operator, with Claude. Requestor: operator. Blocked until the
@@ -34,4 +34,4 @@ Include concise context, blockers, owner/requestor, and ISO 8601 timestamps.
 * 2026-10-13T22:58:00-07:00 - Port terminal rendering from curses and the
   temporary `windows-curses` dependency to the Expletives library on its own
   feature branch, separate from Windows compatibility work. Owner: operator.
-  Requestor: operator. Depends on Phase 11 landing first.
+  Requestor: operator. Depends on Phase 11000 landing first.

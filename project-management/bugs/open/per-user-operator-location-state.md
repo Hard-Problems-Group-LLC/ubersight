@@ -3,7 +3,7 @@
 Status: Open  
 Date Opened: 2026-10-14T01:23:00-07:00  
 Owner: Claude and operator  
-Related: `docs/specifications/windows-platform-support.md` (Slice 14);
+Related: `docs/specifications/windows-platform-support.md` (Phase 11000 Slice 4000);
 `docs/security/operator-location-memory.md`
 
 ## Symptom
