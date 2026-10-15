@@ -557,7 +557,7 @@ How it works:
   (default 5). It exits with status 1 if any dashboard is still running.
   `--force` then ends those dashboards, checking each process's identity
   first so that a reused process ID is never killed. `--dry-run` lists the
-  matches.
+  matches without signaling them.
 
 The older `scripts/ubersight_wrapper.sh` still works on POSIX. It restarts
 after any exit, including Q.

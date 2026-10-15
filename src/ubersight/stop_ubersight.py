@@ -252,9 +252,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     for process in remaining:
         print(f"[ubersight-stop] still running: {process.pid} {process.command}")
+    # A dry run signals nothing, so a "still running" count would mislead.
+    outcome = (
+        "dry run, nothing signaled"
+        if args.dry_run
+        else f"{len(remaining)} still running"
+    )
     print(
         f"[ubersight-stop] matched {len(processes)} Ubersight dashboard(s); "
-        f"{len(remaining)} still running."
+        f"{outcome}."
     )
     return 1 if remaining else 0
 

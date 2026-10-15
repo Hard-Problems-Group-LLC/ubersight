@@ -10,25 +10,28 @@ owner/requestor, and ISO 8601 timestamps.
 Pending Requests
 ----------------
 
-* 2026-10-13T23:03:19-07:00 - Phase 11 Windows support needs three operator
-  checks that this session cannot perform. First, run the live dashboard in
-  a Windows Terminal side pane
-  (`wt -w 0 split-pane -V -s 0.3 -d "$PWD" "$PWD\.venv\Scripts\ubersight.exe"`)
-  and confirm that colors, hotkeys, and resizing behave. Second, run the
-  full test suite on a Linux host or in CI, because no WSL or Linux runner is
-  available on the Windows workstation. Third, decide whether to install
-  managed Python 3.14.6 on Windows now or keep the 3.12 venv until Slice 15.
-  Requestor: Claude. Owner: operator.
-  2026-10-14T00:24:00-07:00 - Third item decided: Windows installs use the
-  pinned Python when the `py` launcher has it, or the newest Python 3
-  otherwise. The live side pane was confirmed working through the
-  autosplit verification. The Linux test run remains open.
-
 Active Requests
 ---------------
 
 Completed Requests
 ------------------
+
+* 2026-10-13T23:03:19-07:00 - Completed: Phase 11 Windows support needed
+  three operator checks that the original session could not perform. First,
+  run the live dashboard in a Windows Terminal side pane
+  (`wt -w 0 split-pane -V -s 0.3 -d "$PWD" "$PWD\.venv\Scripts\ubersight.exe"`)
+  and confirm that colors, hotkeys, and resizing behave. Second, run the
+  full test suite on a Linux host or in CI. Third, decide whether to install
+  managed Python 3.14.6 on Windows now or keep the 3.12 venv until Slice 15.
+  Requestor: Claude. Owner: operator.
+  2026-10-14T00:24:00-07:00 - Third item decided: Windows installs use the
+  pinned Python when the `py` launcher has it, or the newest Python 3
+  otherwise. The live side pane was confirmed working through the
+  autosplit verification.
+  2026-10-14T19:16:00-07:00 - Second item done: the operator set up WSL2
+  Rocky 10.2 and Fedora 44, and Claude ran the installers, the full suite,
+  and the quality gate there. See the specification's Linux Verification
+  section.
 
 * 2026-07-20T23:28:52-07:00 - Completed: the operator ran
   `./scripts/install_prerequisites.sh` and `./install.sh --mode dev` in a

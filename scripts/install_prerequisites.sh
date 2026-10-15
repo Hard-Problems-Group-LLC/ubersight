@@ -116,10 +116,13 @@ main() {
       install_command=(apt-get install -y "${packages[@]}")
       ;;
     dnf|yum)
+      # pyenv's python-build needs awk. Minimal Fedora images, such as the
+      # WSL and container images, ship without one.
       packages=(
         python3 python3-pip git curl ca-certificates gcc make patch
         zlib-devel bzip2 bzip2-devel readline-devel sqlite sqlite-devel
         openssl-devel libffi-devel ncurses-devel xz xz-devel tk-devel findutils
+        gawk
       )
       install_command=("$manager" install -y "${packages[@]}")
       ;;
